@@ -16,5 +16,13 @@ python -m pip install -e '.[dev]'
 mcp-scanner --help
 ```
 
-`mcp-scanner scan` exits with a clear message until the Inventory milestone is
-available. See [the handoff](docs/HANDOFF.md) for the next implementation step.
+Inventory an explicit MCP configuration file without executing it:
+
+```bash
+mcp-scanner inventory --config /path/to/mcp.json --output inventory.json
+```
+
+The command reads only the JSON structure needed to identify MCP configurations;
+it does not run any configured commands or include environment-variable values
+in its output. `mcp-scanner scan` remains unavailable until the later discovery
+and analysis milestones are implemented.
