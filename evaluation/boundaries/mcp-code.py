@@ -38,3 +38,11 @@ def read_via_helper(name: str):
 def read_through_pathlib(name: str):
     # boundary: mcp-path-traversal-read
     return (ROOT / name).read_text(encoding="utf-8")
+
+
+@mcp.tool()
+def read_inside_allow_branch(name: str):
+    path = (ROOT / name).resolve()
+    if path.is_relative_to(ROOT):
+        # boundary: mcp-path-traversal-read
+        return open(path, "r").read()

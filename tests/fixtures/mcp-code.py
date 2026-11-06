@@ -91,6 +91,44 @@ def read_after_unrelated_check(name: str):
 
 
 @mcp.tool()
+def read_after_absolute_path_check(name: str):
+    if Path(name).is_absolute():
+        raise ValueError("absolute path")
+    # ruleid: mcp-path-traversal-read
+    return open(ROOT / name, "r").read()
+
+
+@mcp.tool()
+def read_after_parent_component_check(name: str):
+    if ".." in Path(name).parts:
+        raise ValueError("parent component")
+    # ruleid: mcp-path-traversal-read
+    return open(ROOT / name, "rb").read()
+
+
+@mcp.tool()
+def read_reassigned_path(original: str, replacement: str):
+    path = (ROOT / original).resolve()
+    if not path.is_relative_to(ROOT):
+        raise ValueError("path outside root")
+    path = ROOT / replacement
+    # ruleid: mcp-path-traversal-read
+    return open(path, "r").read()
+
+
+@mcp.tool()
+def read_after_caught_rejection(name: str):
+    try:
+        path = (ROOT / name).resolve()
+        if not path.is_relative_to(ROOT):
+            raise ValueError("path outside root")
+    except ValueError:
+        pass
+    # ruleid: mcp-path-traversal-read
+    return open(path, "r").read()
+
+
+@mcp.tool()
 def read_fixed(name: str):
     # ok: mcp-path-traversal-read
     return open(ROOT / "index.txt", "r").read()

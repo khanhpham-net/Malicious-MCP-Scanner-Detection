@@ -1,0 +1,60 @@
+rules:
+  - id: mcp-shell-input
+    languages: [python]
+    severity: WARNING
+    message: MCP tool input reaches a shell command. Use a fixed executable with separately validated arguments.
+    metadata:
+      cwe: CWE-78
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              @mcp.tool(...)
+              def $TOOL(..., $INPUT: str, ...):
+                  ...
+          - focus-metavariable: $INPUT
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: subprocess.run($COMMAND, ..., shell=True, ...)
+              - pattern: subprocess.run(..., args=$COMMAND, shell=True, ...)
+              - pattern: subprocess.Popen($COMMAND, ..., shell=True, ...)
+              - pattern: subprocess.Popen(..., args=$COMMAND, shell=True, ...)
+              - pattern: os.system($COMMAND)
+          - focus-metavariable: $COMMAND
+
+  - id: mcp-path-traversal-read
+    languages: [python]
+    severity: WARNING
+    message: MCP tool input builds a path under a configured root and reaches a file read. Resolve the candidate and enforce containment in that root.
+    metadata:
+      cwe: CWE-22
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $ROOT = pathlib.Path("...").resolve()
+              ...
+              @mcp.tool(...)
+              def $TOOL(..., $INPUT: str, ...):
+                  ...
+          - pattern: $ROOT / $INPUT
+        exact: true
+    pattern-sanitizers:
+      - patterns:
+          - pattern-inside: |
+              $FILE = ($ROOT / $INPUT).resolve()
+              if not $FILE.is_relative_to($ROOT):
+                  raise ...
+          - pattern: $FILE.is_relative_to($ROOT)
+          - focus-metavariable: $FILE
+        by-side-effect: true
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: open($FILE)
+              - pattern: open($FILE, "r", ...)
+              - pattern: open($FILE, "rb", ...)
+              - pattern: open($FILE, ..., mode="r", ...)
+              - pattern: open($FILE, ..., mode="rb", ...)
+          - focus-metavariable: $FILE
