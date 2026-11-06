@@ -26,3 +26,11 @@ The command reads only the JSON structure needed to identify MCP configurations;
 it does not run any configured commands or include environment-variable values
 in its output. `mcp-scanner scan` remains unavailable until the later discovery
 and analysis milestones are implemented.
+
+Discover static `stdio` server definitions from the inventory:
+
+```bash
+mcp-scanner discover --input inventory.json --output discovery.json
+```
+
+Discovery reads the listed configuration files but does not start any MCP server.
