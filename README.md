@@ -7,6 +7,8 @@ Protocol (MCP) server configurations and packages.
 
 The project contains the scanner foundation, the proposed v0.1 interchange
 contract, and a Semgrep adapter for local source files or directories.
+The [code rules](rules/mcp-code.yaml) cover selected Python MCP shell commands
+and reads using paths built beneath a configured directory.
 
 ## Quick start
 
@@ -27,6 +29,9 @@ checkout, run the included rule and fixture:
 ```powershell
 mcp-scanner scan-code tests/fixtures/mcp-shell-input.py --rules tests/fixtures/mcp-shell-input.yaml --server-id lab:semgrep
 ```
+
+To try both mechanisms and reproduce the comparison with this baseline, see
+[code-rule scope and evaluation](docs/code-rule-evaluation.md).
 
 If the native Windows engine reports `Invalid argument socketpair`, pass
 `--windows-temp PATH` with a compatible local directory. The adapter assigns

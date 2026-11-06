@@ -14,6 +14,7 @@ from mcp_scanner.semgrep_adapter import scan_code
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES = FIXTURES / "mcp-shell-input.yaml"
 SOURCE = FIXTURES / "mcp-shell-input.py"
+EXPANDED_RULES = FIXTURES.parents[1] / "rules/mcp-code.yaml"
 SEMGREP = os.environ.get("MCP_SCANNER_TEST_SEMGREP")
 WINDOWS_TEMP = os.environ.get("MCP_SCANNER_TEST_WINDOWS_TEMP")
 
@@ -82,6 +83,19 @@ class RealSemgrepTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 2)
         self.assertEqual(result["coverage"]["scanned"], [SOURCE.name])
         self.assertIn("large.py", {item["path"] for item in result["coverage"]["skipped"]})
+
+    def test_expanded_rules_keep_original_finding_ids_and_ranges(self) -> None:
+        baseline = self.scan(SOURCE)
+        expanded = self.scan(SOURCE, EXPANDED_RULES)
+
+        self.assertEqual(baseline["status"], "complete")
+        self.assertEqual(expanded["status"], "complete")
+        self.assertEqual(len(baseline["items"]), 2)
+        self.assertCountEqual(
+            [item["finding_id"] for item in expanded["items"]],
+            [item["finding_id"] for item in baseline["items"]],
+        )
+        self.assertCountEqual(expanded["evidence"], baseline["evidence"])
 
     def test_zero_findings_with_and_without_coverage(self) -> None:
         with TemporaryDirectory() as temp:
