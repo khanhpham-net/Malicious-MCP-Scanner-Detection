@@ -1,0 +1,17 @@
+rules:
+  - id: mcp-shell-input
+    languages: [python]
+    severity: WARNING
+    message: Input from an MCP tool parameter reaches subprocess.run with shell=True.
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              @mcp.tool()
+              def $TOOL(..., $INPUT: str, ...):
+                  ...
+          - focus-metavariable: $INPUT
+    pattern-sinks:
+      - patterns:
+          - pattern: subprocess.run($COMMAND, ..., shell=True, ...)
+          - focus-metavariable: $COMMAND

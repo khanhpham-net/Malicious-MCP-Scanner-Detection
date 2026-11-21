@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__
 from .discovery import DiscoveryError, discover, write_discovery
 from .inventory import InventoryError, collect, write_inventory
+from .semgrep_adapter import scan_code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("discovery.json"),
         help="output artifact path (default: discovery.json)",
     )
+
+    code = subcommands.add_parser(
+        "scan-code", help="scan a local source file or directory with Semgrep"
+    )
+    code.add_argument("source", type=Path)
+    code.add_argument("--rules", type=Path, required=True, help="local YAML ruleset")
+    code.add_argument("--server-id", required=True, help="identity of the source MCP server")
+    code.add_argument("--semgrep", default="semgrep", help="Semgrep executable name or path")
+    code.add_argument("--timeout", type=float, default=60, help="scan timeout in seconds")
+    code.add_argument(
+        "--windows-temp", type=Path, help="override TMP and TEMP for the Windows child process"
+    )
     return parser
 
 
@@ -95,6 +109,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(str(error))
         print(f"Wrote {len(artifact['items'])} discovery item(s) to {args.output}")
         return 0
+
+    if args.command == "scan-code":
+        artifact = scan_code(
+            args.source,
+            args.rules,
+            server_id=args.server_id,
+            semgrep=args.semgrep,
+            timeout=args.timeout,
+            windows_temp=args.windows_temp,
+        )
+        print(json.dumps(artifact, indent=2))
+        return {"complete": 0, "partial": 1, "failed": 2}[artifact["status"]]
 
     parser.print_help()
     return 0

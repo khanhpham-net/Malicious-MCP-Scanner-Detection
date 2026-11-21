@@ -33,7 +33,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(collect([path])["items"], [])
 
     def test_rejects_invalid_json(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_directory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             path = self._config(Path(temp_dir), "{")
             with self.assertRaises(InventoryError):
                 collect([path])
