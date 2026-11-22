@@ -1,0 +1,150 @@
+{
+  "contract_version": "1.0",
+  "artifact_type": "scan_report",
+  "generated_at": "2026-11-22T04:02:00Z",
+  "scanner": {
+    "name": "mcp-scanner",
+    "version": "0.5.0-dev",
+    "profile": "static-default",
+    "ruleset_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "policy_version": "trust-policy-v1.0",
+    "owasp_profile": "OWASP-MCP-Top-10-2025-beta",
+    "engines": [
+      {
+        "name": "python_ast",
+        "version": "0.5.0-dev",
+        "status": "complete"
+      },
+      {
+        "name": "semgrep",
+        "edition": "OSS",
+        "version": "1.183.0",
+        "status": "complete"
+      },
+      {
+        "name": "p_surface",
+        "version": "0.5.0-dev",
+        "status": "complete"
+      }
+    ]
+  },
+  "input_provenance": {
+    "server_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "source_id": "github:example-org/sample-partial-av-locked",
+    "input_kind": "git_repo_snapshot",
+    "location": "examples/fixtures/sample-partial-av-locked",
+    "revision": "deadbeef12345678",
+    "package_name": null,
+    "package_version": null,
+    "snapshot_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "languages": [
+      "python"
+    ],
+    "frameworks": [
+      "fastmcp"
+    ]
+  },
+  "scan_status": "partial",
+  "policy_status": "not_evaluated",
+  "exit_code": 2,
+  "coverage": {
+    "files_discovered": 3,
+    "files_scanned": 1,
+    "scanned_files": [
+      "server.py"
+    ],
+    "skipped_files": [
+      {
+        "path": "dist/bundle.min.js",
+        "reason": "minified_file"
+      }
+    ],
+    "read_errors": [
+      {
+        "path": "helpers/loader.py",
+        "error_code": "EACCES_OR_AV_QUARANTINE",
+        "message": "PermissionError: cannot read file (possibly locked or quarantined by endpoint antivirus)."
+      }
+    ],
+    "skipped_budget": [],
+    "surfaces": {
+      "bootstrap": "partial",
+      "config": "none_found",
+      "prompts": "none_found",
+      "resources": "none_found",
+      "tools": "partial"
+    },
+    "sca_status": "unmeasured",
+    "analysis_boundaries": []
+  },
+  "telemetry": {
+    "elapsed_seconds": 1.64,
+    "stage_durations_seconds": {
+      "tier1_inventory_semgrep": 1.1,
+      "tier2_ast_p": 0.44,
+      "tier4_report": 0.1
+    },
+    "budget_cutoff_seconds": 50.0,
+    "hard_timeout_seconds": 60.0,
+    "timed_out": false,
+    "llm_triage": {
+      "enabled": false,
+      "status": "disabled",
+      "model_id": null,
+      "prompt_hash": null,
+      "tokens_used": 0,
+      "estimated_cost_usd": 0.0
+    }
+  },
+  "discovered_servers": [
+    {
+      "server_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "name": "sample-partial-av-locked",
+      "framework": "fastmcp",
+      "language": "python",
+      "transport": "stdio",
+      "tools": [
+        "lookup_item"
+      ],
+      "resources": [],
+      "prompts": []
+    }
+  ],
+  "trust_score": {
+    "score_scope": "provisional",
+    "observed_score": 100,
+    "displayed_score": 60,
+    "provisional_cap": 60,
+    "policy_version": "trust-policy-v1.0",
+    "reason": "1 source file (helpers/loader.py) could not be read; displayed score is capped at provisional ceiling (60) and CI returns scan_fail (exit_code=2).",
+    "contributing_finding_ids": []
+  },
+  "executive_summary": {
+    "tldr": "Scan completed with PARTIAL coverage because helpers/loader.py could not be read (possible AV quarantine). No risk findings were observed in readable files, but trust score is capped at provisional 60/100.",
+    "severity_counts": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "owasp_counts": {},
+    "top_5": []
+  },
+  "findings": [],
+  "review_queue": {
+    "requires_review": true,
+    "priority_tier": "p1_partial_coverage",
+    "reasons": [
+      "Mandatory source file unreadable (EACCES_OR_AV_QUARANTINE)"
+    ],
+    "status": "pending"
+  },
+  "diagnostics": [
+    {
+      "kind": "read_error",
+      "path": "helpers/loader.py",
+      "message": "File skipped without crashing scanner; coverage degraded to partial."
+    }
+  ]
+}

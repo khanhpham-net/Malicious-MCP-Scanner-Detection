@@ -1,0 +1,179 @@
+{
+  "contract_version": "1.0",
+  "artifact_type": "scan_report",
+  "generated_at": "2026-11-22T04:01:00Z",
+  "scanner": {
+    "name": "mcp-scanner",
+    "version": "0.5.0-dev",
+    "profile": "static-default",
+    "ruleset_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "policy_version": "trust-policy-v1.0",
+    "owasp_profile": "OWASP-MCP-Top-10-2025-beta",
+    "engines": [
+      {
+        "name": "python_ast",
+        "version": "0.5.0-dev",
+        "status": "complete"
+      },
+      {
+        "name": "semgrep",
+        "edition": "OSS",
+        "version": "1.183.0",
+        "status": "complete"
+      },
+      {
+        "name": "p_surface",
+        "version": "0.5.0-dev",
+        "status": "complete"
+      }
+    ]
+  },
+  "input_provenance": {
+    "server_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "source_id": "github:example-org/sample-benign-formatter",
+    "input_kind": "git_repo_snapshot",
+    "location": "examples/fixtures/sample-benign-formatter",
+    "revision": "9988776655443322",
+    "package_name": null,
+    "package_version": null,
+    "snapshot_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "languages": [
+      "python"
+    ],
+    "frameworks": [
+      "fastmcp"
+    ]
+  },
+  "scan_status": "complete",
+  "policy_status": "pass",
+  "exit_code": 0,
+  "coverage": {
+    "files_discovered": 2,
+    "files_scanned": 2,
+    "scanned_files": [
+      "server.py",
+      "worker.py"
+    ],
+    "skipped_files": [],
+    "read_errors": [],
+    "skipped_budget": [],
+    "surfaces": {
+      "bootstrap": "scanned",
+      "config": "none_found",
+      "prompts": "none_found",
+      "resources": "none_found",
+      "tools": "scanned"
+    },
+    "sca_status": "unmeasured",
+    "analysis_boundaries": []
+  },
+  "telemetry": {
+    "elapsed_seconds": 1.18,
+    "stage_durations_seconds": {
+      "tier1_inventory_semgrep": 0.72,
+      "tier2_ast_p": 0.39,
+      "tier4_report": 0.07
+    },
+    "budget_cutoff_seconds": 50.0,
+    "hard_timeout_seconds": 60.0,
+    "timed_out": false,
+    "llm_triage": {
+      "enabled": false,
+      "status": "disabled",
+      "model_id": null,
+      "prompt_hash": null,
+      "tokens_used": 0,
+      "estimated_cost_usd": 0.0
+    }
+  },
+  "discovered_servers": [
+    {
+      "server_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "name": "sample-benign-formatter",
+      "framework": "fastmcp",
+      "language": "python",
+      "transport": "stdio",
+      "tools": [
+        "format_markdown"
+      ],
+      "resources": [],
+      "prompts": []
+    }
+  ],
+  "trust_score": {
+    "score_scope": "complete",
+    "observed_score": 100,
+    "displayed_score": 100,
+    "provisional_cap": null,
+    "policy_version": "trust-policy-v1.0",
+    "reason": "No risk findings detected across all inspected static surfaces; informational capabilities carry zero penalty.",
+    "contributing_finding_ids": []
+  },
+  "executive_summary": {
+    "tldr": "No security vulnerabilities or malicious behaviors were detected in static inspection (Trust Score 100/100; 1 informational capability noted).",
+    "severity_counts": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 1
+    },
+    "owasp_counts": {},
+    "top_5": []
+  },
+  "findings": [
+    {
+      "finding_id": "sha256:c8ccd39a5e046eb8a3111a40fc40397a9c1e243166be8b29a6ea261be42d5055",
+      "root_cause_group_id": "rcg:719c79e19db00896b96eb0fc114ad3f3812d597c2dfa5baf55fceea3c0d7308c",
+      "server_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "component": "tool:format_markdown",
+      "rule_id": "mcp-info-fixed-argv-worker",
+      "rule_version": "0.5",
+      "detector": "python_ast.process_exec",
+      "kind": "capability_info",
+      "category": "other",
+      "severity": "info",
+      "evidence_strength": "verified",
+      "confidence": 0.95,
+      "mcp_surface": "A5",
+      "owasp_mapping": {
+        "status": "not_applicable",
+        "primary_id": null,
+        "primary_name": null,
+        "profile_version": "OWASP-MCP-Top-10-2025-beta",
+        "secondary_ids": [],
+        "llm_top10_ids": [],
+        "predicate_rationale": "Informational benign capability consistent with declared tool functionality."
+      },
+      "cwe_ids": [],
+      "title": "Documented pure stdin/stdout subprocess worker with fixed argv",
+      "declaration_span": null,
+      "sink_span": {
+        "path": "server.py",
+        "start_line": 21,
+        "start_col": 5,
+        "end_line": 23,
+        "end_col": 58
+      },
+      "trace": [],
+      "redacted_evidence": {
+        "snippet": "subprocess.run([sys.executable, \"worker.py\", \"--mode\", \"format\"], input=text, capture_output=True, text=True, check=True)",
+        "secrets_redacted": false
+      },
+      "reasoning": "Subprocess uses a fixed argv list invoking a pure stdin/stdout formatter consistent with the declared tool purpose; recorded as informational capability only.",
+      "remediation": "No action required unless subprocess execution is disallowed by host enterprise policy.",
+      "limitations": [],
+      "evidence_sources": [
+        "python_ast.process_exec"
+      ],
+      "review_status": "not_required"
+    }
+  ],
+  "review_queue": {
+    "requires_review": false,
+    "priority_tier": "none",
+    "reasons": [],
+    "status": "not_required"
+  },
+  "diagnostics": []
+}

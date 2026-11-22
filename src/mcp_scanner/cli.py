@@ -1,4 +1,4 @@
-"""Command-line interface for the scanner foundation."""
+"""Command-line interface for mcp-scanner."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ from pathlib import Path
 from . import __version__
 from .discovery import DiscoveryError, discover, write_discovery
 from .inventory import InventoryError, collect, write_inventory
+from .models import INPUT_KINDS
+from .scanner import DEFAULT_BUDGET_CUTOFF_SECONDS, DEFAULT_HARD_TIMEOUT_SECONDS, run_scan
 from .semgrep_adapter import scan_code
+from .source_inventory import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,12 +26,83 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command")
 
     scan = subcommands.add_parser(
-        "scan", help="scan an inventory (available after the Inventory milestone)"
+        "scan",
+        help="run unified static scan on a snapshot directory or source file (v1.0 JSON report)",
+    )
+    scan.add_argument(
+        "target",
+        nargs="?",
+        type=Path,
+        help="path to local MCP snapshot directory or source file",
     )
     scan.add_argument(
         "--input",
+        dest="input_path",
         metavar="PATH",
-        help="reserved for the Inventory output path",
+        type=Path,
+        help="alternative flag for the target directory or file path",
+    )
+    scan.add_argument(
+        "--output",
+        metavar="PATH",
+        type=Path,
+        help="write canonical v1.0 JSON report to file instead of stdout",
+    )
+    scan.add_argument("--server-id", help="stable server identifier override")
+    scan.add_argument("--source-id", help="upstream source identifier (e.g. github:org/repo)")
+    scan.add_argument(
+        "--input-kind",
+        choices=sorted(INPUT_KINDS),
+        help="provenance input kind override",
+    )
+    scan.add_argument("--revision", help="pinned commit SHA or snapshot revision")
+    scan.add_argument("--package-name", help="package name for package_artifact_only inputs")
+    scan.add_argument("--package-version", help="package version for package_artifact_only inputs")
+    scan.add_argument(
+        "--rules",
+        action="append",
+        type=Path,
+        help="local Semgrep YAML rules file (may be repeated; defaults to bundled rules/)",
+    )
+    scan.add_argument("--semgrep", default="semgrep", help="Semgrep executable name or path")
+    scan.add_argument(
+        "--windows-temp",
+        type=Path,
+        help="override TMP and TEMP for the Semgrep child process on Windows",
+    )
+    scan.add_argument(
+        "--no-semgrep",
+        action="store_true",
+        help="skip Semgrep CE execution (useful for AST-only ablation/testing)",
+    )
+    scan.add_argument(
+        "--no-python-ast",
+        action="store_true",
+        help="skip Python AST execution (useful for rule-only ablation/testing)",
+    )
+    scan.add_argument(
+        "--max-files",
+        type=int,
+        default=DEFAULT_MAX_FILES,
+        help=f"maximum source files to inspect (default: {DEFAULT_MAX_FILES})",
+    )
+    scan.add_argument(
+        "--max-file-bytes",
+        type=int,
+        default=DEFAULT_MAX_FILE_BYTES,
+        help=f"maximum size per file in bytes (default: {DEFAULT_MAX_FILE_BYTES})",
+    )
+    scan.add_argument(
+        "--cutoff",
+        type=float,
+        default=DEFAULT_BUDGET_CUTOFF_SECONDS,
+        help=f"analysis cutoff deadline in seconds (default: {DEFAULT_BUDGET_CUTOFF_SECONDS})",
+    )
+    scan.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_HARD_TIMEOUT_SECONDS,
+        help=f"overall hard server timeout cap in seconds (default: {DEFAULT_HARD_TIMEOUT_SECONDS})",
     )
 
     inventory = subcommands.add_parser(
@@ -69,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     code = subcommands.add_parser(
-        "scan-code", help="scan a local source file or directory with Semgrep"
+        "scan-code", help="scan a local source file or directory with Semgrep (v0.1 artifact)"
     )
     code.add_argument("source", type=Path)
     code.add_argument("--rules", type=Path, required=True, help="local YAML ruleset")
@@ -88,9 +162,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "scan":
-        parser.error(
-            "scan is unavailable: inventory collection has not been implemented yet"
+        resolved_target = args.target or args.input_path
+        if resolved_target is None:
+            parser.error("scan requires a target path (positional TARGET or --input PATH)")
+        report = run_scan(
+            resolved_target,
+            server_id=args.server_id,
+            source_id=args.source_id,
+            input_kind=args.input_kind,
+            revision=args.revision,
+            package_name=args.package_name,
+            package_version=args.package_version,
+            rules=args.rules,
+            semgrep=args.semgrep,
+            windows_temp=args.windows_temp,
+            enable_semgrep=not args.no_semgrep,
+            enable_python_ast=not args.no_python_ast,
+            max_file_bytes=args.max_file_bytes,
+            max_files=args.max_files,
+            budget_cutoff_seconds=args.cutoff,
+            hard_timeout_seconds=args.timeout,
         )
+        rendered = report.to_json()
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered, encoding="utf-8")
+        else:
+            print(rendered, end="")
+        return int(report.exit_code if report.exit_code is not None else 2)
 
     if args.command == "inventory":
         try:

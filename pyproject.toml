@@ -21,5 +21,9 @@ mcp-scanner = "mcp_scanner.cli:main"
 testpaths = ["tests"]
 addopts = "-q"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+package-dir = {"" = "src", "mcp_scanner.rules" = "rules"}
+packages = ["mcp_scanner", "mcp_scanner.python_ast", "mcp_scanner.rules"]
+
+[tool.setuptools.package-data]
+"mcp_scanner.rules" = ["*.yaml", "*.yml"]

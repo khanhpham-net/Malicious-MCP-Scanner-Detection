@@ -1,0 +1,334 @@
+rules:
+  - id: mcp-js-child-process-exec
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Dynamic command reaches Node.js child_process shell execution. Use execFile/spawn with a fixed executable and validated argv list without shell: true."
+    metadata:
+      category: C
+      kind: vulnerability
+      mcp_surface: A5
+      behavior_class: command_injection
+      cwe:
+        - CWE-78
+    pattern-either:
+      # 1. Default / namespace import or require: bind exact $CP receiver so RegExp.exec() never matches
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec($CMD, ...)
+              - pattern: $CP.execSync($CMD, ...)
+          - pattern-not: $CP.exec("...", ...)
+          - pattern-not: $CP.execSync("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("node:child_process")
+                  ...
+      # 2. Direct chained require("child_process").exec(...)
+      - patterns:
+          - pattern-either:
+              - pattern: require("child_process").exec($CMD, ...)
+              - pattern: require("child_process").execSync($CMD, ...)
+              - pattern: require("node:child_process").exec($CMD, ...)
+              - pattern: require("node:child_process").execSync($CMD, ...)
+          - pattern-not: require("child_process").exec("...", ...)
+          - pattern-not: require("child_process").execSync("...", ...)
+          - pattern-not: require("node:child_process").exec("...", ...)
+          - pattern-not: require("node:child_process").execSync("...", ...)
+      # 3. Named import/destructure of bare exec / execSync (bound strictly to bare function name)
+      - patterns:
+          - pattern: exec($CMD, ...)
+          - pattern-not: exec("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., exec, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., exec, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern: execSync($CMD, ...)
+          - pattern-not: execSync("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., execSync, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., execSync, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., execSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., execSync, ... } = require("node:child_process")
+                  ...
+      # 4. spawn / spawnSync with shell: true (bound to exact $CP or bare imported spawn/spawnSync)
+      - patterns:
+          - pattern-either:
+              - pattern: '$CP.spawn($CMD, $ARGS, { ..., shell: true, ... })'
+              - pattern: '$CP.spawnSync($CMD, $ARGS, { ..., shell: true, ... })'
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern: 'spawn($CMD, $ARGS, { ..., shell: true, ... })'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., spawn, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., spawn, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., spawn, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., spawn, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern: 'spawnSync($CMD, $ARGS, { ..., shell: true, ... })'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., spawnSync, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., spawnSync, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., spawnSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., spawnSync, ... } = require("node:child_process")
+                  ...
+
+  - id: mcp-js-obfuscated-exec
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Decoded or obfuscated data (base64/hex/atob) flows into dynamic JS/TS code or command execution."
+    metadata:
+      category: dynamic_code_execution
+      kind: malicious_behavior
+      mcp_surface: A5
+      behavior_class: obfuscated_code_execution
+      cwe:
+        - CWE-506
+        - CWE-94
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: Buffer.from($DATA, "base64", ...)
+          - pattern: Buffer.from($DATA, "hex", ...)
+          - pattern: atob($DATA)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: eval($SINK)
+          - pattern: new Function(..., $SINK)
+          - pattern: Function(..., $SINK)
+          - pattern: $VM.runInNewContext($SINK, ...)
+          - pattern: $VM.runInThisContext($SINK, ...)
+          - pattern: new $VM.Script($SINK, ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: $CP.exec($SINK, ...)
+                  - pattern: $CP.execSync($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("node:child_process")
+                      ...
+          - patterns:
+              - pattern: exec($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("node:child_process")
+                      ...
+          - patterns:
+              - pattern: execSync($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., execSync, ... } from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import { ..., execSync, ... } from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const { ..., execSync, ... } = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const { ..., execSync, ... } = require("node:child_process")
+                      ...
+
+  - id: mcp-js-dynamic-code-exec
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Dynamic JavaScript/TypeScript code execution via eval, Function constructor, or vm module."
+    metadata:
+      category: dynamic_code_execution
+      kind: vulnerability
+      mcp_surface: A5
+      behavior_class: dynamic_code_execution
+      cwe:
+        - CWE-94
+    pattern-either:
+      - patterns:
+          - pattern: eval($CODE)
+          - pattern-not: eval("...")
+      - patterns:
+          - pattern-either:
+              - pattern: new Function(..., $CODE)
+              - pattern: Function(..., $CODE)
+          - pattern-not: new Function("...")
+          - pattern-not: Function("...")
+      - pattern: $VM.runInNewContext($CODE, ...)
+      - pattern: $VM.runInThisContext($CODE, ...)
+      - pattern: new $VM.Script($CODE, ...)
+
+  - id: mcp-js-env-to-network
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Environment variable data (process.env) flows into an outbound network call. Verify destination host, scope, and authorization policy."
+    metadata:
+      category: S
+      kind: vulnerability
+      mcp_surface: A5
+      behavior_class: sensitive_env_to_network
+      cwe:
+        - CWE-200
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: process.env
+          - pattern: process.env.$VAR
+          - pattern: process.env[$VAR]
+    pattern-sinks:
+      - pattern-either:
+          - pattern: fetch($URL, ...)
+          - pattern: axios($ARG, ...)
+          - pattern: axios.post($URL, ...)
+          - pattern: axios.get($URL, ...)
+          - pattern: axios.put($URL, ...)
+          - pattern: axios.request($ARG, ...)
+          - pattern: $HTTP.request($ARG, ...)
+          - pattern: $NET.connect($ARG, ...)
+          - pattern: $NET.createConnection($ARG, ...)
+
+  - id: mcp-js-sensitive-file-to-network
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Sensitive local credential or configuration file contents flow into an outbound network call."
+    metadata:
+      category: S
+      kind: malicious_behavior
+      mcp_surface: A5
+      behavior_class: sensitive_file_to_network
+      cwe:
+        - CWE-200
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $FS.readFileSync($PATH, ...)
+              - pattern: $FS.readFile($PATH, ...)
+              - pattern: readFileSync($PATH, ...)
+              - pattern: readFile($PATH, ...)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '(?i).*(\.ssh|\.aws|\.npmrc|\.env|id_rsa|credentials|secret|token).*'
+    pattern-sinks:
+      - pattern-either:
+          - pattern: fetch($URL, ...)
+          - pattern: axios($ARG, ...)
+          - pattern: axios.post($URL, ...)
+          - pattern: axios.put($URL, ...)
+          - pattern: axios.request($ARG, ...)
+          - pattern: $HTTP.request($ARG, ...)
+          - pattern: $NET.connect($ARG, ...)
+
+  - id: mcp-js-sensitive-fs-capability
+    languages: [javascript, typescript]
+    severity: INFO
+    message: "Informational capability: JS/TS code reads a path matching common credential or dotfile locations (no outbound network sink confirmed by this rule alone)."
+    metadata:
+      category: other
+      kind: capability_info
+      mcp_surface: A5
+      behavior_class: sensitive_fs_read_capability
+    patterns:
+      - pattern-either:
+          - pattern: $FS.readFileSync($PATH, ...)
+          - pattern: $FS.readFile($PATH, ...)
+          - pattern: readFileSync($PATH, ...)
+          - pattern: readFile($PATH, ...)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: '(?i).*(\.ssh|\.aws|\.npmrc|\.env|id_rsa|credentials).*'
