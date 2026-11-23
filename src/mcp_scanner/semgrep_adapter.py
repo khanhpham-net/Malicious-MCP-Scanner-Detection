@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -357,6 +358,9 @@ def _structural_safe_evidence(rule_id: str, behavior_class: str, span: SourceSpa
 
 def _resolve_semgrep_executable(semgrep: str) -> str:
     executable = shutil.which(semgrep)
+    if executable is None and semgrep == "semgrep":
+        venv_scripts = str(Path(sys.executable).resolve().parent)
+        executable = shutil.which(semgrep, path=venv_scripts)
     if executable is None or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
         raise ValueError(f"Semgrep executable not found: {semgrep}")
     executable_path = Path(executable).resolve()
@@ -394,16 +398,21 @@ def _prepare_windows_socket_temp(
     if default_tmp and " " not in default_tmp:
         return None
     cwd_path = Path.cwd().resolve()
-    if (
-        " " not in str(cwd_path)
-        and len(str(cwd_path)) <= 65
-        and not _is_same_or_child(cwd_path, inventory_root)
-    ):
-        try:
-            sock_dir = stack.enter_context(TemporaryDirectory(prefix="sg_", dir=str(cwd_path)))
-            return Path(sock_dir).resolve()
-        except OSError:
-            pass
+    venv_root = Path(sys.executable).resolve().parent.parent
+    for base_candidate in (cwd_path, venv_root):
+        if (
+            base_candidate.is_dir()
+            and " " not in str(base_candidate)
+            and len(str(base_candidate)) <= 65
+            and not _is_same_or_child(base_candidate, inventory_root)
+        ):
+            try:
+                sock_dir = stack.enter_context(
+                    TemporaryDirectory(prefix="sg_", dir=str(base_candidate))
+                )
+                return Path(sock_dir).resolve()
+            except OSError:
+                continue
     return None
 
 
@@ -526,7 +535,7 @@ def scan_inventory_with_semgrep(
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(record.text, encoding="utf-8")
+                dest.write_bytes(record.text.encode("utf-8"))
                 staged_count += 1
             except OSError as error:
                 diagnostics.append(

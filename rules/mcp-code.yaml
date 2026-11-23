@@ -13,6 +13,208 @@ rules:
               def $TOOL(..., $INPUT: str, ...):
                   ...
           - focus-metavariable: $INPUT
+    pattern-sanitizers:
+      # Only sanitize argument expressions appended after a fixed, metacharacter-free command prefix
+      # (never sanitize the entire command or executable position, and never trust `assert`).
+      - patterns:
+          - pattern-either:
+              - pattern: $PREFIX + shlex.quote($ARG)
+              - pattern: $PREFIX + quote($ARG)
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $SAFE = str($X) if str($X).replace($CH, "").isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.replace($CH, "").isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = str($X) if $X.replace($CH, "").isalnum() else $FALLBACK
+                  ...
+          - metavariable-regex:
+              metavariable: $CH
+              regex: '^[''"][\-_.:]+[''"]$'
+          - metavariable-regex:
+              metavariable: $FALLBACK
+              regex: '^[''"][A-Za-z0-9_.:/-]+[''"]$'
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE = $REASSIGN
+              ...
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE += $REASSIGN
+              ...
+          - pattern: $PREFIX + $SAFE
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $SAFE = str($X) if str($X).replace($CH, "").replace($CH2, "").isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.replace($CH, "").replace($CH2, "").isalnum() else $FALLBACK
+                  ...
+          - metavariable-regex:
+              metavariable: $CH
+              regex: '^[''"][\-_.:]+[''"]$'
+          - metavariable-regex:
+              metavariable: $CH2
+              regex: '^[''"][\-_.:]+[''"]$'
+          - metavariable-regex:
+              metavariable: $FALLBACK
+              regex: '^[''"][A-Za-z0-9_.:/-]+[''"]$'
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE = $REASSIGN
+              ...
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE += $REASSIGN
+              ...
+          - pattern: $PREFIX + $SAFE
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $SAFE = str($X) if str($X).isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = str($X) if $X.isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.isalnum() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.isdigit() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = str($X) if str($X).isdigit() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.isalpha() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.isdecimal() else $FALLBACK
+                  ...
+              - pattern-inside: |
+                  $SAFE = $X if $X.isnumeric() else $FALLBACK
+                  ...
+          - metavariable-regex:
+              metavariable: $FALLBACK
+              regex: '^[''"][A-Za-z0-9_.:/-]+[''"]$'
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE = $REASSIGN
+              ...
+          - pattern-not-inside: |
+              $SAFE = $A if $COND else $B
+              ...
+              $SAFE += $REASSIGN
+              ...
+          - pattern: $PREFIX + $SAFE
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  if not $X.isalnum():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not $X.isalnum():
+                      raise ...
+                  ...
+              - pattern-inside: |
+                  if not $X.isdigit():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not $X.isdigit():
+                      raise ...
+                  ...
+              - pattern-inside: |
+                  if not $X.isalpha():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not $X.isalpha():
+                      raise ...
+                  ...
+              - pattern-inside: |
+                  if not str($X).isalnum():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not str($X).isalnum():
+                      raise ...
+                  ...
+          - pattern-not-inside: |
+              if not $COND:
+                  ...
+              ...
+              $X = $REASSIGN
+              ...
+          - pattern-not-inside: |
+              if not $COND:
+                  ...
+              ...
+              $X += $REASSIGN
+              ...
+          - pattern: $PREFIX + $X
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  if not $X.replace($CH, "").isalnum():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not $X.replace($CH, "").isalnum():
+                      raise ...
+                  ...
+              - pattern-inside: |
+                  if not str($X).replace($CH, "").isalnum():
+                      return ...
+                  ...
+              - pattern-inside: |
+                  if not str($X).replace($CH, "").isalnum():
+                      raise ...
+                  ...
+          - metavariable-regex:
+              metavariable: $CH
+              regex: '^[''"][\-_.:]+[''"]$'
+          - pattern-not-inside: |
+              if not $COND:
+                  ...
+              ...
+              $X = $REASSIGN
+              ...
+          - pattern-not-inside: |
+              if not $COND:
+                  ...
+              ...
+              $X += $REASSIGN
+              ...
+          - pattern: $PREFIX + $X
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: '^[''"][A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* [''"]$'
     pattern-sinks:
       - patterns:
           - pattern-either:

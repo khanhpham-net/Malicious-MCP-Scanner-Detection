@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 import posixpath
 from pathlib import PurePosixPath
 import re
 
-from .flow import Value, combine
+from .flow import Value, combine, within_temporary_path
+from .process_effects import SENSITIVE_TRANSFER, fixed_process_effect, is_ssh_access_file
+from .shell_words import plain_shell_argv
 
 DECODE = {"base64.b64decode", "base64.standard_b64decode", "base64.urlsafe_b64decode",
           "base64.b32decode", "bytes.fromhex", "bytearray.fromhex", "binascii.unhexlify",
@@ -22,15 +25,30 @@ CONSTRUCTORS = {"pathlib.Path", "pathlib.PosixPath", "pathlib.WindowsPath", "sub
                 "sqlite3.connect", "socket.socket", "socket.create_connection", "requests.Session",
                 "requests.session", "httpx.Client", "httpx.AsyncClient", "aiohttp.ClientSession",
                 "http.client.HTTPConnection", "http.client.HTTPSConnection"}
-PRESERVE = {"str", "bytes", "bytearray", "dict", "list", "tuple", "json.dumps", "json.loads",
+GENERIC_CONTAINERS = {"dict", "list", "tuple", "set"}
+PRESERVE = GENERIC_CONTAINERS | {"str", "bytes", "bytearray", "json.dumps", "json.loads",
             "urllib.parse.urlencode", "urllib.parse.quote", "os.path.expanduser", "os.path.join"}
+TEXT_TRANSFORMS = {
+    "strip", "lstrip", "rstrip", "lower", "upper", "casefold", "title", "capitalize",
+    "swapcase", "removeprefix", "removesuffix", "replace", "translate", "ljust", "rjust",
+    "center", "zfill", "expandtabs", "format", "format_map", "join", "encode", "decode",
+    "split", "rsplit", "splitlines", "partition", "rpartition",
+}
+SCALAR_METHODS = {
+    "startswith", "endswith", "isalnum", "isalpha", "isdigit", "isdecimal", "isnumeric",
+    "isascii", "isspace", "isidentifier", "islower", "isupper", "istitle", "isprintable",
+    "find", "rfind", "index", "rindex", "count",
+}
 SECRET_KEY = re.compile(r"(?:TOKEN|PASS(?:WORD|WD)?|SECRET|CREDENTIAL|API.?KEY|PRIVATE.?KEY|ACCESS.?KEY|AUTH|COOKIE|SESSION.?KEY)", re.I)
 SECRET_PATH = re.compile(r"(?:^|/)(?:\.env(?:\.[^/]*)?|\.(?:ssh|aws|gnupg)(?:/|$)|\.npmrc$|\.netrc$|credentials(?:\.[^/]*)?$|(?:tokens?|wallet|keystore)(?:[./]|$))", re.I)
 SQL_WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE)\b", re.I)
 
 
 def secret_path(value) -> bool:
-    return isinstance(value, str) and bool(SECRET_PATH.search(value.replace("\\", "/")))
+    if not isinstance(value, str):
+        return False
+    path = value.replace("\\", "/")
+    return path in {"/etc/shadow", "/etc/gshadow"} or bool(SECRET_PATH.search(path))
 
 
 def env_value(frame, node, key):
@@ -98,15 +116,46 @@ def process(frame, node, name, args, kw):
     executable = kw.get("executable", Value())
     first = command.items[0] if command.items else command
     controlling = combine(command if shell and not command.items else first, executable)
+    posix_shell = executable.constant in {"/bin/sh", "/bin/bash", "/bin/dash"}
+    shell_argv = plain_shell_argv(command, posix_shell=posix_shell) if shell and not command.items else ()
     # A shell-quoted value still controls executable selection when it is the whole command.
-    steps = controlling.marks.get("input") or controlling.marks.get("quoted")
-    if ("input" not in controlling.marks and command.posix_quoted_command and shell
-            and executable.constant in {"/bin/sh", "/bin/bash", "/bin/dash"}):
+    steps = (controlling.marks.get("input") or controlling.marks.get("quoted")
+             or controlling.marks.get("shell_safe_arg"))
+    if (shell_argv and not executable.marks and not controlling.marks.get("input")
+            and (not controlling.marks.get("quoted") or posix_shell)):
         steps = None
     if steps:
         frame.emit(node, "command_injection", steps, symbol=name)
+        return Value()
+
+    worker_args = args if name.endswith("subprocess_exec") else command.items or shell_argv
+    fixed_argv = [item.constant for item in worker_args]
+    if not all(isinstance(item, str) for item in fixed_argv):
+        fixed_argv = []
+    command_text = command.constant if isinstance(command.constant, str) else None
+    if shell and command.items and fixed_argv:
+        command_text = fixed_argv[0]
+    effect = None
+    branch_step = ()
+    default_executable = "executable" not in kw or any(
+        option.arg == "executable" and isinstance(option.value, ast.Constant) and option.value.value is None
+        for option in node.keywords
+    )
+    if default_executable or isinstance(executable.constant, str):
+        effect = fixed_process_effect(command_text, fixed_argv, shell=shell, executable=executable.constant)
+        if effect is None and shell and command.string_options:
+            effects = [
+                fixed_process_effect(text, (), shell=True, executable=executable.constant)
+                for text in command.string_options
+            ]
+            effect = next((possible for possible in effects if possible is not None), None)
+            if effect and any(possible != effect for possible in effects):
+                step = frame.step(node, "transform", "alternative fixed command")
+                branch_step = (replace(step, edge_kind="possible"),)
+    if effect:
+        behavior = "shell_sensitive_transfer" if effect == SENSITIVE_TRANSFER else "risky_fixed_execution"
+        frame.emit(node, behavior, branch_step, symbol=name, detail=effect)
     elif frame.reg:
-        worker_args = args if name.endswith("subprocess_exec") else command.items
         frame.worker(node, name, worker_args)
     return Value()
 
@@ -119,7 +168,16 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         return env_value(frame, node, kw.get("key", first).constant)
     effect = mutation(name, recv, args, kw)
     if effect:
-        frame.effect(node, name, effect)
+        target = recv if name.startswith(("pathlib.Path.", "io.file.")) else kw.get("path", first)
+        frame.effect(node, name, effect, temporary=target.temporary_path)
+    if is_ssh_access_file(recv.constant) and (
+        name in {"pathlib.Path.write_text", "pathlib.Path.write_bytes"}
+        or name in {"io.file.write", "io.file.writelines"}
+        and recv.fields.get("writable", Value()).constant is True
+    ):
+        frame.emit(node, "ssh_access_file_write", symbol=name)
+    if name == "tempfile.TemporaryDirectory":
+        return Value(ref=name)
     if name in {"print", "logging.info", "logging.warning", "logging.error", "logging.debug"} and "secret" in values.marks:
         frame.emit(node, "local_disclosure", values.marks["secret"], symbol=name)
     if name in PROCESS:
@@ -131,14 +189,27 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
     if name == "urllib.request.Request.add_header" and len(args) >= 2:
         recv.fields["headers"] = combine(recv.fields.get("headers", Value()), args[1])
         return Value()
-    if name == "getattr" and len(args) >= 2 and isinstance(args[1].constant, str):
+    if name in {"getattr", "builtins.getattr"} and len(args) >= 2:
         attr = args[1].constant
-        if first.ref in frame.engine.index.classes:
+        index = frame.engine.index
+        first_party = first.ref in index.classes or first.ref in index.modules
+        if first_party and not isinstance(attr, str):
+            candidates = []
+            if first.ref in index.classes:
+                names = args[1].string_options or index.method_names(first.ref)
+                for method_name in names:
+                    if len(candidates) == 8:
+                        return Value(unresolved_callable=True)
+                    fallback = Value(ref=f"{first.ref}.{method_name}", bound_to=first)
+                    candidates.append(first.fields.get(method_name, fallback))
+            return Value(choices=tuple(candidates), unresolved_callable=True)
+        if first.ref in index.classes:
             return first.fields.get(attr, Value(ref=f"{first.ref}.{attr}", bound_to=first))
-        if first.ref in frame.engine.index.modules:
+        if first.ref in index.modules:
             return Value(ref=f"{first.ref}.{attr}")
-    if name == "str" and isinstance(first.constant, str):
-        return Value(constant=first.constant, marks=first.marks)
+    if name in {"str", "builtins.str"}:
+        constant = str(first.constant) if type(first.constant) in {str, int, float, bool} else None
+        return replace(first, constant=constant, ref="str", text_kind="str").through(frame.step(node, "transform", "str"))
     if name == "os.path.dirname" and isinstance(first.constant, str):
         return Value(constant=posixpath.dirname(first.constant), marks=first.marks)
     if name in {"os.environ.copy", "os.environ.items", "os.environ.values"}:
@@ -159,7 +230,12 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         return operand.through(frame.step(node, "transform", name)) if name.endswith("compile") else Value()
     if name in {"open", "builtins.open", "io.open", "pathlib.Path.open"}:
         path = recv if name == "pathlib.Path.open" else kw.get("file", first)
-        return Value(ref="io.file", constant=path.constant)
+        mode_position = 0 if name == "pathlib.Path.open" else 1
+        fallback_mode = args[mode_position] if len(args) > mode_position else Value(constant="r")
+        mode = kw.get("mode", fallback_mode).constant
+        writable = isinstance(mode, str) and any(flag in mode for flag in "wax+")
+        return Value(ref="io.file", constant=path.constant, temporary_path=path.temporary_path,
+                     fields={"writable": Value(constant=writable)})
     if name in {"pathlib.Path.read_text", "pathlib.Path.read_bytes", "io.file.read", "io.file.readline", "io.file.readlines"}:
         if secret_path(recv.constant):
             return Value().mark("secret", frame.step(node, "source", "credential file read"))
@@ -181,13 +257,19 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         const = first.constant
         if ref == "pathlib.Path" and args and all(isinstance(a.constant, str) for a in args):
             const = posixpath.join(*(a.constant for a in args))
-        return Value(ref=ref, constant=const, marks=values.marks)
+        temporary = ref == "pathlib.Path" and within_temporary_path(first, args[1:])
+        return Value(ref=ref, constant=const, marks=values.marks, temporary_path=temporary)
     if name == "pathlib.Path.home":
         return Value(ref="pathlib.Path", constant="~")
     if name == "os.path.expanduser":
         return first
-    if name == "os.path.join" and args and all(isinstance(a.constant, str) for a in args):
-        return Value(constant=posixpath.join(*(a.constant for a in args)), marks=values.marks)
+    if name in {"os.path.normpath", "os.path.abspath", "os.path.realpath"} and isinstance(first.constant, str):
+        if name == "os.path.normpath" or posixpath.isabs(first.constant):
+            # Keep lexical source evidence without touching the scanner filesystem.
+            return replace(first, constant=posixpath.normpath(first.constant))
+    if name == "os.path.join" and args:
+        const = posixpath.join(*(a.constant for a in args)) if all(isinstance(a.constant, str) for a in args) else None
+        return Value(constant=const, marks=values.marks, temporary_path=within_temporary_path(first, args[1:]))
     if name == "sqlite3.connect.cursor":
         return Value(ref="sqlite3.cursor", constant=recv.constant)
     if name.startswith("pathlib.Path.") and method in {"with_name", "with_stem", "with_suffix"}:
@@ -202,9 +284,28 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         path = recv.constant
         if method == "joinpath" and isinstance(path, str) and all(isinstance(a.constant, str) for a in args):
             path = posixpath.join(path, *(a.constant for a in args))
-        return Value(ref="pathlib.Path", constant=path, marks=combine(recv, values).marks)
-    if name in PRESERVE or method in {"encode", "decode", "join", "format", "strip", "replace"}:
-        return combine(values, recv).through(frame.step(node, "transform", name or method))
+        temporary = method == "joinpath" and within_temporary_path(recv, args)
+        return Value(ref="pathlib.Path", constant=path, marks=combine(recv, values).marks, temporary_path=temporary)
+    text_receiver = not recv.ref or recv.ref in {"str", "bytes", "bytearray"}
+    if name in PRESERVE or method in TEXT_TRANSFORMS and text_receiver:
+        transformed = combine(values, recv)
+        if name != "str":
+            transformed = transformed.without_shell_guard()
+        if method in TEXT_TRANSFORMS and text_receiver:
+            if method == "encode":
+                transformed.text_kind = "bytes"
+            elif method == "decode":
+                transformed.text_kind = "str"
+            elif method not in {"split", "rsplit", "splitlines", "partition", "rpartition"}:
+                transformed.text_kind = recv.text_type()
+        return transformed.through(frame.step(node, "transform", name or method))
     if method == "get" and isinstance(first.constant, str) and recv.fields:
         return recv.fields.get(first.constant, Value())
+    if method in SCALAR_METHODS and (text_receiver or recv.ref in GENERIC_CONTAINERS):
+        return Value()
+    if method and recv.marks and text_receiver:
+        step = replace(frame.step(node, "transform", method), edge_kind="possible")
+        return combine(recv, values).without_shell_guard().through(step)
+    if method and recv.marks:
+        frame.engine.boundary("external_lib", frame.mod.path, "Tainted receiver passed through an external method without a summary.")
     return Value()

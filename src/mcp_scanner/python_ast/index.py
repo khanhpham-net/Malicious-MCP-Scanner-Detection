@@ -10,7 +10,9 @@ from ..models import SourceSpan, stable_sha256_id
 
 Function = ast.FunctionDef | ast.AsyncFunctionDef
 SERVER_TYPES = {"fastmcp.FastMCP": "fastmcp", "mcp.server.fastmcp.FastMCP": "fastmcp",
+                "mcp.server.FastMCP": "fastmcp",
                 "mcp.server.Server": "mcp", "mcp.server.lowlevel.Server": "mcp"}
+UNVERIFIED_SERVER_TYPES = {"mcp.FastMCP": "fastmcp"}
 REGISTRATIONS = {"tool", "resource", "prompt", "add_tool"}
 
 
@@ -93,6 +95,7 @@ class Index:
         self.classes: dict[str, tuple[Module, ast.ClassDef]] = {}
         self.method_owners = {}
         self.instances: dict[str, tuple[Module, str, str]] = {}
+        self.unverified_instances: set[str] = set()
         self.registrations: list[Registration] = []
         self.unresolved: list[tuple[str, int]] = []
         for mod in modules:
@@ -119,10 +122,7 @@ class Index:
                 tick()
                 if not isinstance(value, ast.Call):
                     continue
-                framework = SERVER_TYPES.get(mod.qualify(dotted(value.func)))
-                if framework:
-                    title = literal(argument(value, "name", 0))
-                    self.instances[f"{mod.name}.{name}"] = mod, framework, title if isinstance(title, str) else name
+                self._register_instance(mod, value, f"{mod.name}.{name}", name)
         self.instance_aliases = {}
         for mod in modules:
             for name, value in mod.assignments.items():
@@ -134,6 +134,17 @@ class Index:
         self.tick = tick
         for mod in modules:
             self._scope(mod, mod.tree.body, {}, (), ())
+
+    def _register_instance(self, mod, call, instance, binding):
+        constructor = mod.qualify(dotted(call.func))
+        framework = SERVER_TYPES.get(constructor) or UNVERIFIED_SERVER_TYPES.get(constructor)
+        if framework is None:
+            return None
+        title = literal(argument(call, "name", 0))
+        self.instances.setdefault(instance, (mod, framework, title if isinstance(title, str) else binding))
+        if constructor in UNVERIFIED_SERVER_TYPES:
+            self.unverified_instances.add(instance)
+        return instance
 
     def _scope(self, mod, statements, supplied, calls, active):
         """Resolve registration inside explicitly called first-party server factories."""
@@ -150,12 +161,10 @@ class Index:
             return env.get(name, functions.get(name, self.resolve(mod, name)))
 
         def resolve_call(call, binding):
-            qn = mod.qualify(dotted(call.func))
-            if qn in SERVER_TYPES and binding:
+            if binding:
                 instance = f"{mod.name}.{calls!r}.{binding}" if calls else f"{mod.name}.{binding}"
-                title = literal(argument(call, "name", 0))
-                self.instances.setdefault(instance, (mod, SERVER_TYPES[qn], title if isinstance(title, str) else binding))
-                return instance
+                if instance := self._register_instance(mod, call, instance, binding):
+                    return instance
             target = self.functions.get(symbol(call.func))
             if target and len(calls) < 12:
                 owner, fn = target
@@ -247,7 +256,22 @@ class Index:
             visited.add(current)
             module, cls = self.classes[current]
             yield module, cls
-            pending.extend(self.resolve(module, dotted(base)) for base in reversed(cls.bases))
+            pending.extend(self.resolve(module, self.base_name(base)) for base in reversed(cls.bases))
+
+    @staticmethod
+    def base_name(base):
+        return dotted(base.value if isinstance(base, ast.Subscript) else base)
+
+    def has_external_base(self, owner):
+        builtin_bases = {"Exception", "BaseException", "dict", "list", "set", "tuple", "str", "int", "bytes"}
+        for module, cls in self.class_lineage(owner):
+            for base in cls.bases:
+                name = self.base_name(base)
+                if self.resolve(module, name) in self.classes:
+                    continue
+                if name in builtin_bases or name.partition(".")[0] in module.aliases:
+                    return True
+        return False
 
     def method(self, owner, name, *, after=""):
         for module, cls in self.class_lineage(owner):
@@ -259,6 +283,16 @@ class Index:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == name:
                     return module, stmt
         return None
+
+    def method_names(self, owner):
+        seen = set()
+        for _, cls in self.class_lineage(owner):
+            for stmt in cls.body:
+                self.tick()
+                if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) or stmt.name in seen:
+                    continue
+                seen.add(stmt.name)
+                yield stmt.name
 
     def server_ids(self, snapshot_id: str) -> dict[str, str]:
         return {key: snapshot_id if len(self.instances) == 1 else stable_sha256_id([snapshot_id, mod.path, key])

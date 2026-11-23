@@ -165,3 +165,62 @@ class SourceInventoryTests(unittest.TestCase):
 
         self.assertTrue(inv.timed_out)
         self.assertLess(inv.files_discovered, 12)
+
+    def test_dist_included_only_for_published_npm_package_without_src(self) -> None:
+        # 1. Published npm package: package.json points to ./dist/index.js and no src/ directory exists
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"name": "published-mcp", "bin": {"cli": "./dist/index.js"}}\n',
+                encoding="utf-8",
+            )
+            (root / "dist").mkdir()
+            (root / "dist" / "index.js").write_text("console.log('ok');\n", encoding="utf-8")
+            inv_npm = collect_source_inventory(root)
+
+        self.assertIn("dist/index.js", [f.rel_path for f in inv_npm.files])
+
+        # 2. Repo with src/ AND dist/ where package.json explicitly declares main=./dist/index.js:
+        #    BOTH src/index.ts and the declared runtime entrypoint dist/index.js must be covered
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"name": "source-and-dist-mcp", "main": "./dist/index.js"}\n',
+                encoding="utf-8",
+            )
+            (root / "src").mkdir()
+            (root / "src" / "index.ts").write_text("export const ok = 1;\n", encoding="utf-8")
+            (root / "dist").mkdir()
+            (root / "dist" / "index.js").write_text("exports.ok = 1;\n", encoding="utf-8")
+            inv_both = collect_source_inventory(root)
+
+        self.assertIn("src/index.ts", [f.rel_path for f in inv_both.files])
+        self.assertIn("dist/index.js", [f.rel_path for f in inv_both.files])
+
+        # 3. Source TS repo with src/ AND unreferenced dist/ (package.json points to src/): dist stays ignored
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"name": "source-only-mcp", "main": "./src/index.ts"}\n',
+                encoding="utf-8",
+            )
+            (root / "src").mkdir()
+            (root / "src" / "index.ts").write_text("export const ok = 1;\n", encoding="utf-8")
+            (root / "dist").mkdir()
+            (root / "dist" / "stale.js").write_text("exports.ok = 1;\n", encoding="utf-8")
+            inv_src = collect_source_inventory(root)
+
+        self.assertIn("src/index.ts", [f.rel_path for f in inv_src.files])
+        self.assertNotIn("dist/stale.js", [f.rel_path for f in inv_src.files])
+        self.assertIn(("dist", "ignored_directory"), {(s.path, s.reason) for s in inv_src.skipped_files})
+
+        # 4. Python repo without package.json: build/ stays ignored_directory
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "build").mkdir()
+            (root / "build" / "gen.py").write_text("y = 2\n", encoding="utf-8")
+            inv_py = collect_source_inventory(root)
+
+        self.assertEqual([f.rel_path for f in inv_py.files], ["server.py"])
+        self.assertIn(("build", "ignored_directory"), {(s.path, s.reason) for s in inv_py.skipped_files})

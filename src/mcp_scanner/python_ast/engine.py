@@ -5,14 +5,16 @@ import ast
 from copy import deepcopy
 from pathlib import PurePosixPath
 import posixpath
-import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 from ..models import (AnalysisBoundary, Finding, RedactedEvidence, TraceStep,
                       make_finding_id, make_root_cause_group_id)
 from . import rules
-from .flow import Value, combine, joined
+from .flow import Value, combine, joined, within_temporary_path
 from .index import Module, Registration, dotted, literal, location
+from .patterns import match_pattern, pattern_constants
+from .shell_words import safe_word_regex, shell_fragments
+from .summaries import DeferredCall, SummaryBudgetReached, SummarySolver, value_key
 
 # rule id, category, kind, severity, title, CWE
 RULES = {
@@ -20,6 +22,12 @@ RULES = {
                           "Declared tool contract conflicts with a persistent mutation", []),
     "command_injection": ("mcp-py-command-injection", "C", "vulnerability", "high",
                           "Handler input controls a shell command or executable", ["CWE-78"]),
+    "risky_fixed_execution": ("mcp-py-risky-fixed-execution", "C", "semantic_indicator", "high",
+                              "Statically resolved command performs a high-risk operation", []),
+    "resource_destruction": ("mcp-py-resource-destruction", "M", "semantic_indicator", "high",
+                             "MCP resource removes or truncates persistent data", []),
+    "ssh_access_file_write": ("mcp-py-ssh-access-file-write", "config_auth", "semantic_indicator", "high",
+                              "Python writes to an SSH access-control file", []),
     "worker_mutation": ("mcp-py-worker-mutation", "C", "semantic_indicator", "high",
                         "A launched Python worker changes state under a restrictive contract", []),
     "unannotated_worker_mutation": ("mcp-py-unannotated-worker-mutation", "C", "semantic_indicator", "medium",
@@ -30,14 +38,24 @@ RULES = {
                           "Handler launches a process", []),
     "sensitive_network_flow": ("mcp-py-sensitive-network-flow", "S", "semantic_indicator", "high",
                                "Credential data reaches a network operation", ["CWE-200"]),
+    "shell_sensitive_transfer": ("mcp-py-shell-sensitive-transfer", "S", "semantic_indicator", "high",
+                                 "A fixed shell command sends credential-bearing data to a network client", ["CWE-200"]),
     "dynamic_code_execution": ("mcp-py-dynamic-code-execution", "dynamic_code_execution",
                                "semantic_indicator", "high", "Transformed data or handler input reaches a dynamic code sink", ["CWE-94"]),
+}
+
+_RESOURCE_DESTRUCTION_APIS = {
+    "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree",
+    "pathlib.Path.unlink", "pathlib.Path.rmdir", "io.file.truncate",
 }
 
 
 REMEDIATION = {
     "M": "Remove the persistent operation or disclose the effect and correct the tool annotations.",
     "C": "Constrain executable selection, pass arguments separately, and declare worker effects.",
+    "resource_destruction": "Keep destructive operations outside resource reads and require separate user authorization.",
+    "risky_fixed_execution": "Review the fixed command and replace the dangerous operation with an audited, restricted API.",
+    "config_auth": "Move access-policy changes behind explicit authorization and audit the affected permissions.",
     "S": "Verify the destination and audience before sending credentials; minimize outbound fields.",
     "dynamic_code_execution": "Use a fixed parser or a trusted callable in place of executing transformed input.",
     "other": "Review the recorded data or process capability and restrict it to the declared purpose.",
@@ -58,10 +76,10 @@ def evidence_shape(symbol, node):
     return symbol + "(" + ", ".join(args) + ")"
 
 
-def quoted_argument(prefix, argument):
-    # A fixed executable/argv prefix, followed by exactly one entire quoted shell word.
-    return (isinstance(prefix, str) and bool(re.fullmatch(r"[A-Za-z0-9_./-]+(?: [A-Za-z0-9_./-]+)* ", prefix))
-            and "quoted" in argument.marks and "input" not in argument.marks)
+@dataclass
+class LoopPaths:
+    breaks: list[dict[str, Value]] = field(default_factory=list)
+    continues: list[dict[str, Value]] = field(default_factory=list)
 
 
 class Engine:
@@ -77,6 +95,8 @@ class Engine:
         self.copy_memo = {}
         self.findings = {}
         self.boundaries = set()
+        self.summary_solver: SummarySolver | None = None
+        self.summary_safe_functions: dict[tuple[str, int], bool] = {}
 
     def module_env(self, name):
         if self.handler_globals is None or name not in self.globals:
@@ -114,24 +134,33 @@ class Engine:
             frame = Frame(self, module, env, reg=reg, stack=((module.name, fn.lineno),))
             params = [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs, fn.args.vararg, fn.args.kwarg]
             for param in filter(None, params):
-                if dotted(param.annotation).split(".")[-1] == "Context":
+                annotation = dotted(param.annotation)
+                if annotation.split(".")[-1] == "Context":
                     env[param.arg] = Value()
                 else:
-                    env[param.arg] = Value().mark("input", frame.step(param, "source", "handler argument"))
+                    kind = "str" if annotation in {"str", "builtins.str"} else ""
+                    env[param.arg] = Value(text_kind=kind).mark("input", frame.step(param, "source", "handler argument"))
             frame.block(fn.body)
 
 
 class Frame:
     def __init__(self, engine: Engine, module: Module, env, *, reg: Registration | None = None,
-                 calls=(), stack=(), worker_effects=None):
+                 calls=(), stack=(), worker_effects=None, control_steps=()):
         self.engine, self.mod, self.env = engine, module, env
         self.reg, self.calls, self.stack = reg, calls, stack
         self.worker_effects = worker_effects
+        self.control_steps = control_steps
+        self.loops: list[LoopPaths] = []
         self.returns: list[Value] = []
+        self.deferred = False
         self.method_self = None
 
     def step(self, node, role, symbol):
         return TraceStep(role, location(self.mod.path, node), symbol=symbol)
+
+    def incomplete(self, kind, detail):
+        self.engine.boundary(kind, self.mod.path, detail)
+        self.engine.result.status = "partial"
 
     def emit(self, node, behavior, steps=(), *, symbol, detail="", extra=()):
         if self.worker_effects is not None:
@@ -149,27 +178,38 @@ class Frame:
         trace = []
         if reg and category == "M":
             trace.append(TraceStep("source", declaration, symbol="MCP contract"))
-        for step in (*steps, *self.calls, self.step(node, "sink", symbol), *extra):
+        for step in (*steps, *self.calls, *self.control_steps, self.step(node, "sink", symbol), *extra):
             if step not in trace:
                 trace.append(step)
         limits = ["Network destination and credential audience are unverified."] if category == "S" else []
+        if any(step.edge_kind == "possible" for step in trace):
+            limits.append("A statically possible branch or call target requires runtime confirmation.")
+        if reg and reg.instance in self.engine.index.unverified_instances:
+            trace[-1] = replace(trace[-1], edge_kind="possible")
+            limits.append("The MCP constructor import is unverified; the handler's static behavior was inspected.")
         possible = any(step.edge_kind == "possible" for step in trace)
-        if possible:
-            limits.append("Runtime selection among statically known call targets is unresolved.")
         confidence = 0.65 if possible else (0.85 if severity == "high" else 0.7)
         finding = Finding(fid, group, server, component, rid, "0.5", "python_ast", kind, category,
             severity, "traced_or_grounded", confidence,
             ("A4" if category == "M" else "A5") if reg else "A3", title,
-            detail or title, REMEDIATION[category],
+            detail or title, REMEDIATION.get(behavior, REMEDIATION[category]),
             cwe_ids=list(cwes), declaration_span=declaration, sink_span=sink, trace=trace,
             redacted_evidence=RedactedEvidence.from_raw(evidence_shape(symbol, node)), limitations=limits,
             review_status="pending" if severity in {"high", "critical"} or kind == "malicious_behavior" else "not_required")
         self.engine.findings[fid] = finding
         self.engine.result.findings.append(finding)
 
-    def effect(self, node, name, effect):
+    def _resource_destruction(self, name, temporary):
+        return (
+            self.reg is not None and self.reg.kind == "resource"
+            and name in _RESOURCE_DESTRUCTION_APIS and not temporary
+        )
+
+    def effect(self, node, name, effect, *, temporary=False):
         if self.worker_effects is not None:
-            self.worker_effects.append((effect, self.step(node, "sink", name)))
+            self.worker_effects.append((effect, self.step(node, "sink", name), temporary))
+        elif self._resource_destruction(name, temporary):
+            self.emit(node, "resource_destruction", symbol=name, detail="Destructive filesystem operation reached from a resource handler.")
         elif self.reg and (self.reg.readonly is True or (self.reg.destructive is False and effect != "write")):
             self.emit(node, "contract_mutation", symbol=name, detail=f"Observed persistent operation: {effect}.")
 
@@ -198,7 +238,11 @@ class Frame:
                    "sys.argv": Value(ref="list", items=(Value(constant=target.path), *rest))}
             frame = Frame(self.engine, target, env, stack=self.stack, worker_effects=effects)
             frame.block(target.tree.body)
-            for effect, step in effects:
+            for effect, step, temporary in effects:
+                if self._resource_destruction(step.symbol, temporary):
+                    self.emit(node, "resource_destruction", symbol=name, extra=(step,),
+                              detail="A worker launched by a resource handler reaches a destructive filesystem operation.")
+                    return
                 if self.reg.readonly is True or (self.reg.destructive is False and effect != "write"):
                     self.emit(node, "worker_mutation", symbol=name, extra=(step,))
                     return
@@ -249,7 +293,45 @@ class Frame:
         if truth and isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and test.func.attr == "is_relative_to":
             if isinstance(test.func.value, ast.Name):
                 return test.func.value.id, "contained_path"
+        if truth:
+            subject = self.shell_guard_subject(test)
+            if subject:
+                return subject, "shell_safe_arg"
         return None
+
+    def shell_guard_subject(self, test):
+        if not isinstance(test, ast.Call) or not isinstance(test.func, ast.Attribute) or test.keywords:
+            return None
+        if self.resolve(test.func) == "re.fullmatch" and len(test.args) == 2:
+            expression, subject = test.args
+            if isinstance(literal(expression), str) and safe_word_regex(literal(expression)) and isinstance(subject, ast.Name):
+                return subject.id
+        predicates = {"isalnum", "isalpha", "isdigit", "isdecimal", "isnumeric"}
+        if test.func.attr not in predicates or test.args:
+            return None
+        subject = test.func.value
+        if isinstance(subject, ast.Call) and isinstance(subject.func, ast.Attribute) and subject.func.attr == "replace":
+            if len(subject.args) != 2 or subject.keywords:
+                return None
+            removed, replacement = (literal(arg) for arg in subject.args)
+            if not isinstance(removed, str) or not removed or set(removed) - set("-_.:") or replacement != "":
+                return None
+            subject = subject.func.value
+        if isinstance(subject, ast.Call) and len(subject.args) == 1 and not subject.keywords:
+            if self.resolve(subject.func) in {"str", "builtins.str"} and isinstance(subject.args[0], ast.Name):
+                return subject.args[0].id
+        if isinstance(subject, ast.Name) and self.env.get(subject.id, Value()).text_type() == "str":
+            return subject.id
+        return None
+
+    def apply_guard(self, test, truth):
+        guard = self.branch_guard(test, truth)
+        if guard and guard[0] in self.env:
+            key, kind = guard
+            value = self.env[key]
+            step = self.step(test, "guard", kind)
+            # Containment is path evidence; character and allowlist proofs are distinct.
+            self.env[key] = value.through(step) if kind == "contained_path" else value.guarded(kind, step)
 
     def branch(self, node):
         cond = self.value(node.test)
@@ -259,25 +341,127 @@ class Frame:
             if isinstance(cond.constant, bool) and cond.constant != truth:
                 continue
             self.env = initial.copy()
-            guard = self.branch_guard(node.test, truth)
-            if guard and guard[0] in self.env:
-                key, kind = guard
-                val = self.env[key]
-                step = self.step(node.test, "guard", kind)
-                # Containment is path evidence, not a shell sanitizer.
-                self.env[key] = val.through(step) if kind == "contained_path" else val.guarded(kind, step)
+            self.apply_guard(node.test, truth)
             if self.block(body):
                 continuing.append(self.env)
+        return self.merge_paths(initial, continuing)
+
+    def merge_paths(self, initial, continuing):
         self.env = initial
-        if continuing:
-            initial.clear()
-            initial.update(continuing[0])
-            for branch in continuing[1:]:
-                for key in initial.keys() | branch.keys():
-                    initial[key] = joined(initial.get(key, Value()), branch.get(key, Value()))
-        return bool(continuing)
+        if not continuing:
+            return False
+        initial.clear()
+        initial.update(continuing[0])
+        for branch in continuing[1:]:
+            for key in initial.keys() | branch.keys():
+                initial[key] = joined(initial.get(key, Value()), branch.get(key, Value()))
+        return True
+
+    def match(self, node):
+        subject = self.value(node.subject)
+        initial = self.env
+        steps = self.control_steps
+        continuing = []
+        unmatched = True
+        for case in node.cases:
+            self.engine.tick()
+            feasible, bindings = match_pattern(case.pattern, subject)
+            if feasible is False:
+                continue
+            self.env = initial.copy()
+            self.env.update(bindings)
+            constants = pattern_constants(case.pattern)
+            if constants and isinstance(node.subject, ast.Name):
+                literal_guard = self.step(case.pattern, "guard", "match literal")
+                refined = subject.guarded("allowlisted", literal_guard)
+                if len(constants) == 1:
+                    refined = replace(refined, constant=constants[0], string_options=())
+                elif refined.constant is None and all(isinstance(value, str) for value in constants):
+                    refined = replace(refined, string_options=constants)
+                self.env[node.subject.id] = refined
+            condition = self.value(case.guard).constant if case.guard else True
+            if condition is False:
+                continue
+            if case.guard and any(isinstance(expr, ast.NamedExpr) for expr in ast.walk(case.guard)):
+                self.incomplete("dynamic_dispatch", "Assignment in a match guard may affect later cases.")
+            if case.guard:
+                self.apply_guard(case.guard, True)
+            if feasible is None or condition is not True:
+                step = replace(self.step(case.pattern, "guard", "possible match"), edge_kind="possible")
+                self.control_steps = (*steps, step)
+            if self.block(case.body):
+                continuing.append(self.env)
+            self.control_steps = steps
+            if feasible is True and condition is True:
+                unmatched = False
+                break
+        if unmatched:
+            continuing.append(initial.copy())
+        return self.merge_paths(initial, continuing)
+
+    def unsupported_statement(self, node):
+        label = type(node).__name__
+        self.incomplete("dynamic_dispatch", f"Unsupported Python statement {label} at line {node.lineno}.")
+        diagnostic = {"code": "UNSUPPORTED_PYTHON_STATEMENT", "path": self.mod.path,
+                      "line": node.lineno, "statement": label}
+        if diagnostic not in self.engine.result.diagnostics:
+            self.engine.result.diagnostics.append(diagnostic)
+
+    def loop(self, node):
+        initial = self.env
+        condition = self.value(node.test).constant if isinstance(node, ast.While) else None
+        infinite_condition = isinstance(node, ast.While) and literal(node.test) is True
+        before = initial.copy()
+        control = LoopPaths()
+        normal = [before.copy()]
+        if condition is True:
+            normal.clear()
+        if condition is not False:
+            self.env = before.copy()
+            if not isinstance(node, ast.While):
+                iterable = self.value(node.iter)
+                element = iterable.items[0] if iterable.items else iterable
+                for alternative in iterable.items[1:]:
+                    element = joined(element, alternative)
+                self.bind(node.target, element)
+            self.loops.append(control)
+            try:
+                continued = self.block(node.body)
+            finally:
+                self.loops.pop()
+            if not infinite_condition:
+                if continued:
+                    normal.append(self.env)
+                normal.extend(control.continues)
+        if normal:
+            self.merge_paths(before.copy(), normal)
+            if self.block(node.orelse):
+                control.breaks.append(self.env)
+        return self.merge_paths(initial, control.breaks)
+
+    def delete(self, node):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self.env.pop(target.id, None)
+                continue
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                mapping = self.value(target.value)
+                key = self.value(target.slice).constant
+                if mapping.ref == "dict":
+                    if isinstance(key, str):
+                        fields = {name: value for name, value in mapping.fields.items() if name != key}
+                        self.env[target.value.id] = replace(mapping, fields=fields)
+                    continue
+            self.unsupported_statement(node)
 
     def block(self, nodes):
+        try:
+            return self._block(nodes)
+        except DeferredCall:
+            self.deferred = True
+            return False
+
+    def _block(self, nodes):
         for node in nodes:
             self.engine.tick()
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and self.calls:
@@ -310,24 +494,25 @@ class Frame:
             elif isinstance(node, ast.If):
                 if not self.branch(node):
                     return False
+            elif isinstance(node, ast.Match):
+                if not self.match(node):
+                    return False
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 for item in node.items:
                     v = self.value(item.context_expr)
                     if item.optional_vars:
-                        self.bind(item.optional_vars, v)
+                        entered = Value(temporary_path=True) if v.ref == "tempfile.TemporaryDirectory" else v
+                        self.bind(item.optional_vars, entered)
                 if not self.block(node.body):
                     return False
             elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-                before = self.env.copy()
-                if isinstance(node, ast.While):
-                    self.value(node.test)
-                else:
-                    contents = self.value(node.iter)
-                    self.bind(node.target, combine(*contents.items) if contents.items else contents)
-                self.block(node.body)
-                for key, val in before.items():
-                    self.env[key] = joined(val, self.env.get(key, Value()))
-                self.block(node.orelse)
+                if not self.loop(node):
+                    return False
+            elif isinstance(node, (ast.Break, ast.Continue)) and self.loops:
+                control = self.loops[-1]
+                paths = control.breaks if isinstance(node, ast.Break) else control.continues
+                paths.append(self.env.copy())
+                return False
             elif isinstance(node, ast.Try):
                 before = self.env.copy()
                 self.block(node.body)
@@ -340,6 +525,15 @@ class Frame:
                         after[key] = joined(after.get(key, Value()), val)
                 self.env.update(after)
                 self.block(node.finalbody)
+            elif isinstance(node, ast.Assert):
+                self.value(node.test)
+                self.value(node.msg)
+            elif isinstance(node, ast.Delete):
+                self.delete(node)
+            elif isinstance(node, ast.Pass) or isinstance(node, ast.Global) and not self.stack:
+                continue
+            else:
+                self.unsupported_statement(node)
         return True
 
     def resolve(self, node):
@@ -353,13 +547,59 @@ class Frame:
             qualified = f"{self.mod.name}.{path}"
         return qualified
 
+    def summary_context(self, module, fn, args, kw):
+        key = module.name, fn.lineno
+        if key not in self.engine.summary_safe_functions:
+            self.engine.summary_safe_functions[key] = all(
+                not isinstance(node, (ast.Global, ast.Nonlocal, ast.Yield, ast.YieldFrom, ast.Delete))
+                and not (isinstance(node, (ast.Subscript, ast.Attribute)) and isinstance(node.ctx, ast.Store))
+                and not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                         and node.func.attr in {"append", "extend", "update", "add", "clear", "pop", "remove"})
+                for node in ast.walk(fn)
+            )
+        if key in self.engine.index.method_owners or not self.engine.summary_safe_functions[key]:
+            return None
+        if any(v.fields or v.items or v.choices or v.bound_to or v.ref in self.engine.index.classes
+               for v in (*args, *kw.values())):
+            return None
+        worker = self.worker_effects is not None
+        if worker and len(self.env.get("sys.argv", Value()).items) > 32:
+            return None
+        return (key, tuple(map(value_key, args)), tuple((k, value_key(v)) for k, v in sorted(kw.items())),
+                worker, value_key(self.env.get("sys.argv", Value())) if worker else ())
+
     def invoke(self, node, module, fn, args, kw, *, possible=False):
         key = module.name, fn.lineno
-        if key in self.stack or len(self.stack) >= 14:
-            self.engine.boundary("dynamic_dispatch", self.mod.path, "Recursive or deep call summary truncated.")
-            self.engine.result.status = "partial"
+        context = self.summary_context(module, fn, args, kw)
+        if len(self.stack) >= 24 or (context is None and key in self.stack):
+            self.incomplete("budget_exceeded", "First-party call exceeds its bounded summary context.")
             return Value()
-        step = replace(self.step(node, "call", fn.name), edge_kind="possible" if possible else "definite")
+        solver = self.engine.summary_solver
+        cyclic = solver is not None and context in solver.active
+        step = replace(self.step(node, "call", fn.name), edge_kind="possible" if possible or cyclic else "definite")
+        if context is None:
+            result = self.evaluate_function(module, fn, args, kw, step)
+            if result is None:
+                raise DeferredCall
+            return result.through(step)
+        if solver is not None:
+            return solver.evaluate(context, lambda: self.evaluate_function(module, fn, args, kw, step),
+                                   self.worker_effects).through(step)
+        solver = SummarySolver(self.engine.tick)
+        self.engine.summary_solver = solver
+        try:
+            result = solver.solve(lambda: solver.evaluate(
+                context, lambda: self.evaluate_function(module, fn, args, kw, step), self.worker_effects
+            ))
+        except SummaryBudgetReached:
+            self.incomplete("budget_exceeded", "Recursive call summaries did not converge within the analysis budget.")
+            return Value()
+        finally:
+            self.engine.summary_solver = None
+        return result.through(step)
+
+    def evaluate_function(self, module, fn, args, kw, step):
+        key = module.name, fn.lineno
         env = self.engine.module_env(module.name).copy()
         if self.worker_effects is not None:
             if "sys.argv" in self.env:
@@ -378,16 +618,18 @@ class Frame:
             rest = tuple(args[len(params):])
             env[fn.args.vararg.arg] = replace(combine(*rest), items=rest)
         frame = Frame(self.engine, module, env, reg=self.reg, stack=(*self.stack, key),
-                      calls=(*self.calls, step), worker_effects=self.worker_effects)
+                      calls=(*self.calls, step), worker_effects=self.worker_effects,
+                      control_steps=self.control_steps)
         if key in self.engine.index.method_owners and args:
             frame.method_self = args[0]
-        frame.block(fn.body)
+        if frame.block(fn.body):
+            frame.returns.append(Value())
         if not frame.returns:
-            return Value()
+            return None if frame.deferred else Value()
         ret = frame.returns[0]
         for other in frame.returns[1:]:
             ret = joined(ret, other)
-        return ret.through(step)
+        return ret
 
     def first_party_call(self, node, callee, args, kw, *, possible=False):
         index = self.engine.index
@@ -468,6 +710,14 @@ class Frame:
                 callee = Value(ref=name, bound_to=recv)
             else:
                 callee = self.value(node.func)
+                if isinstance(node.func, ast.Subscript) and dotted(node.func.value):
+                    base = node.func.value
+                    ref = self.value(base).ref
+                    is_builtin = ref.startswith("builtins.") or (
+                        isinstance(base, ast.Name) and ref == base.id and base.id not in self.env
+                    )
+                    if is_builtin and (container := ref.removeprefix("builtins.")) in rules.GENERIC_CONTAINERS:
+                        callee = Value(ref=container)
                 name = callee.ref
             args = []
             for arg in node.args:
@@ -483,24 +733,33 @@ class Frame:
                     kw.update(value.fields)
                 else:
                     kw[keyword.arg] = value
+            if callee.unresolved_callable:
+                self.incomplete("dynamic_dispatch", "Indirect callable could not be resolved exhaustively.")
             if callee.choices:
                 returns = []
                 for choice in callee.choices:
                     resolved = self.first_party_call(node, choice, args, kw, possible=True)
                     if resolved is not None:
                         returns.append(resolved)
+                if len(returns) < len(callee.choices):
+                    self.incomplete("dynamic_dispatch", "Some first-party dispatch targets could not be summarized.")
                 if returns:
                     result = returns[0]
                     for alternative in returns[1:]:
                         result = joined(result, alternative)
                     return result
-            if not name and isinstance(node.func, ast.Name) and node.func.id in self.env and self.reg:
-                self.engine.boundary("dynamic_dispatch", self.mod.path, "Indirect callable could not be resolved.")
+            if (not callee.unresolved_callable and not name and isinstance(node.func, ast.Name)
+                    and node.func.id in self.env and self.reg):
+                self.incomplete("dynamic_dispatch", "Indirect callable could not be resolved.")
             resolved = self.first_party_call(node, callee, args, kw)
             if resolved is not None:
                 return resolved
-            if recv.ref in self.engine.index.classes:
-                self.engine.boundary("dynamic_dispatch", self.mod.path, "Unresolved first-party method.")
+            owner = callee.bound_to
+            if owner and owner.ref in self.engine.index.classes:
+                if self.engine.index.has_external_base(owner.ref):
+                    self.engine.boundary("external_lib", self.mod.path, "Inherited method belongs to an external base class.")
+                else:
+                    self.incomplete("dynamic_dispatch", "Unresolved first-party method.")
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 owner = node.func.value.id
                 if node.func.attr == "update" and owner in self.env and (recv.ref == "dict" or recv.fields):
@@ -530,7 +789,7 @@ class Frame:
                     for condition in clause.ifs:
                         self.value(condition)
                 if isinstance(node, ast.DictComp):
-                    return combine(self.value(node.key), self.value(node.value))
+                    return replace(combine(self.value(node.key), self.value(node.value)), ref="dict")
                 return self.value(node.elt)
             finally:
                 self.env = outer
@@ -549,7 +808,14 @@ class Frame:
             return replace(combine(*values), ref="dict", fields=fields)
         if isinstance(node, ast.Subscript):
             val = self.value(node.value)
+            if isinstance(node.slice, ast.Slice) and val.ref not in {"list", "tuple"}:
+                for bound in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if bound is not None:
+                        self.value(bound)
+                return combine(val).through(self.step(node, "transform", "slice"))
             if isinstance(node.slice, ast.Slice) and val.ref in {"list", "tuple"}:
+                if not val.items and val.marks:
+                    return combine(val).through(self.step(node, "transform", "slice"))
                 bounds = (node.slice.lower, node.slice.upper, node.slice.step)
                 indices = [self.value(b).constant if b is not None else None for b in bounds]
                 if all(b is None or isinstance(i, int) or isinstance(b, ast.Constant) and b.value is None
@@ -567,7 +833,7 @@ class Frame:
                 if 0 < len(options) <= 8:
                     return replace(combine(val), choices=options)
                 if len(options) > 8:
-                    self.engine.boundary("dynamic_dispatch", self.mod.path, "Dispatch table exceeds the static candidate limit.")
+                    return replace(combine(val), unresolved_callable=True)
             if isinstance(key, int) and -len(val.items) <= key < len(val.items):
                 return val.items[key]
             return combine(val)
@@ -576,11 +842,13 @@ class Frame:
             value = combine(a, b)
             if isinstance(node.op, ast.Div) and a.ref == "pathlib.Path":
                 const = posixpath.join(a.constant, b.constant) if isinstance(a.constant, str) and isinstance(b.constant, str) else None
-                return replace(value, ref=a.ref, constant=const)
+                return replace(value, ref=a.ref, constant=const, temporary_path=within_temporary_path(a, (b,)))
             if isinstance(node.op, ast.Add):
                 if a.ref in {"list", "tuple"} and a.ref == b.ref:
                     return self.concatenate(a, b)
-                value.posix_quoted_command = quoted_argument(a.constant, b)
+                parts = (*shell_fragments(a), *shell_fragments(b))
+                if len(parts) <= 32:
+                    value.shell_parts = parts
             if isinstance(node.op, ast.Add) and isinstance(a.constant, str) and isinstance(b.constant, str):
                 if len(a.constant) + len(b.constant) <= 4096:
                     value.constant = a.constant + b.constant
@@ -595,16 +863,48 @@ class Frame:
                     return Value(constant=member == isinstance(node.ops[0], ast.In))
             return Value()
         if isinstance(node, ast.IfExp):
-            return joined(self.value(node.body), self.value(node.orelse))
+            condition = self.value(node.test).constant
+            initial = self.env
+            values = []
+            paths = []
+            for truth, body in ((True, node.body), (False, node.orelse)):
+                if isinstance(condition, bool) and truth != condition:
+                    continue
+                self.env = initial.copy()
+                self.apply_guard(node.test, truth)
+                try:
+                    values.append(self.value(body))
+                except DeferredCall:
+                    self.deferred = True
+                    continue
+                paths.append(self.env)
+            self.merge_paths(initial, paths)
+            if not values:
+                raise DeferredCall
+            return values[0] if len(values) == 1 else joined(*values)
         if isinstance(node, (ast.Await, ast.FormattedValue, ast.Starred)):
             return self.value(node.value)
         if isinstance(node, ast.JoinedStr):
             parts = [self.value(v) for v in node.values]
             result = combine(*parts)
-            if len(parts) == 2 and isinstance(node.values[1], ast.FormattedValue):
-                slot = node.values[1]
-                result.posix_quoted_command = (slot.conversion == -1 and slot.format_spec is None
-                                               and quoted_argument(parts[0].constant, parts[1]))
+            default_format = all(
+                not isinstance(expr, ast.FormattedValue)
+                or expr.conversion == -1 and expr.format_spec is None for expr in node.values
+            )
+            if default_format and len(parts) <= 32:
+                result.shell_parts = tuple(
+                    str(part.constant) if type(part.constant) in {str, int, float, bool} else part
+                    for part in parts
+                )
+            if all(
+                type(part.constant) in {str, int, float, bool}
+                and (not isinstance(expr, ast.FormattedValue)
+                     or expr.conversion == -1 and expr.format_spec is None)
+                for expr, part in zip(node.values, parts)
+            ):
+                strings = [str(part.constant) for part in parts]
+                if sum(map(len, strings)) <= 4096:
+                    result.constant = "".join(strings)
             return result
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
             constant = self.value(node.operand).constant

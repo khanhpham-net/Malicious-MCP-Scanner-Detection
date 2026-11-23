@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +28,13 @@ from .models import (
     ScanTelemetry,
     SourceSpan,
     TopFindingSummary,
+    TraceStep,
     TrustScore,
     compute_exit_code,
     stable_sha256_id,
 )
 from .package_json_analyzer import PackageJsonAnalysisResult, analyze_package_json_files
+from .sca_adapter import ScaAnalysisResult, analyze_sca_offline
 from .semgrep_adapter import (
     SemgrepV1Result,
     discover_default_rule_files,
@@ -106,7 +108,7 @@ def _is_profile_source_path(rel_path: str) -> bool:
     if p.suffix.lower() in _PROFILE_SOURCE_EXTENSIONS:
         return True
     name = p.name.lower()
-    if name in {"package.json", "pyproject.toml"}:
+    if name in {"package.json", "binding.gyp", "pyproject.toml"}:
         return True
     if name.startswith("requirements") and name.endswith(".txt"):
         return True
@@ -189,6 +191,44 @@ def _prefer_finding(a: Finding, b: Finding) -> tuple[Finding, Finding]:
     if score_b > score_a:
         return b, a
     return a, b
+
+
+def _attach_install_script_provenance(
+    findings: list[Finding],
+    install_script_provenance: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Attach file-level manifest install provenance to confirmed sink findings safely."""
+    if not install_script_provenance:
+        return
+    for finding in findings:
+        if (
+            finding.kind == "capability_info"
+            or finding.detector == "package_json_analyzer"
+            or finding.sink_span is None
+        ):
+            continue
+        prov_entries = install_script_provenance.get(finding.sink_span.path)
+        if not prov_entries:
+            continue
+        if "package_json_analyzer" not in finding.evidence_sources:
+            finding.evidence_sources.append("package_json_analyzer")
+        existing_symbols = {step.symbol for step in finding.trace}
+        prepended: list[TraceStep] = []
+        for prov in prov_entries:
+            sym = str(prov["symbol"])
+            if sym not in existing_symbols:
+                prepended.append(
+                    TraceStep(
+                        role="source",
+                        span=prov["span"],
+                        symbol=sym,
+                        edge_kind="possible",
+                        note="Package manifest install hook references this script file (file-level provenance; install-time reachability to this sink is unverified).",
+                    )
+                )
+                existing_symbols.add(sym)
+        if prepended:
+            finding.trace = prepended + list(finding.trace)
 
 
 def deduplicate_findings(
@@ -492,15 +532,27 @@ def run_scan(
     windows_temp: Path | None = None,
     enable_semgrep: bool = True,
     enable_python_ast: bool = True,
+    enable_sca: bool = True,
+    osv_db: Path | None = None,
+    osv_db_sha256: str | None = None,
+    osv_scanner: str | None = None,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_files: int = DEFAULT_MAX_FILES,
     budget_cutoff_seconds: float = DEFAULT_BUDGET_CUTOFF_SECONDS,
     hard_timeout_seconds: float = DEFAULT_HARD_TIMEOUT_SECONDS,
+    on_stage: Callable[[str, str], None] | None = None,
 ) -> ScanReport:
     """Execute the end-to-end static scan pipeline and return a canonical v1.0 ScanReport."""
     scan_start = time.monotonic()
     stage_durations: dict[str, float] = {}
     diagnostics: list[dict[str, Any]] = []
+
+    def _notify(stage: str, detail: str) -> None:
+        if on_stage is not None:
+            try:
+                on_stage(stage, detail)
+            except Exception:
+                pass
 
     if not _is_valid_positive_finite(budget_cutoff_seconds) or not _is_valid_positive_finite(hard_timeout_seconds):
         elapsed = time.monotonic() - scan_start
@@ -555,6 +607,7 @@ def run_scan(
     ]
 
     # Stage 1: Resilient source inventory
+    _notify("inventory:start", "Collecting source inventory")
     t0 = time.monotonic()
     try:
         inventory = collect_source_inventory(
@@ -603,6 +656,10 @@ def run_scan(
             diagnostics=[{"kind": "inventory_error", "message": str(error)}],
         )
     stage_durations["tier1_inventory"] = time.monotonic() - t0
+    _notify(
+        "inventory:done",
+        f"{len(inventory.files)} file(s), {stage_durations['tier1_inventory'] * 1000:.0f}ms",
+    )
 
     resolved_server_id = server_id or stable_sha256_id(
         {"root_name": inventory.root.name, "snapshot_sha256": inventory.snapshot_sha256}
@@ -618,15 +675,21 @@ def run_scan(
         )
 
     # Stage 2: package.json static analysis (Branch C)
+    _notify("package_json:start", "Inspecting package.json manifests")
     t0 = time.monotonic()
     pkg_result: PackageJsonAnalysisResult = analyze_package_json_files(
         inventory, server_id=resolved_server_id, deadline=deadline
     )
     stage_durations["tier1_package_json"] = time.monotonic() - t0
+    _notify(
+        "package_json:done",
+        f"{pkg_result.status}, {stage_durations['tier1_package_json'] * 1000:.0f}ms",
+    )
     diagnostics.extend(pkg_result.diagnostics)
     analysis_boundaries.extend(pkg_result.analysis_boundaries)
 
     # Stage 3: Python AST engine (Branch B hook)
+    _notify("python_ast:start", "Running Python AST analysis")
     if enable_python_ast:
         py_data, py_dur = _invoke_python_ast(
             inventory, server_id=resolved_server_id, deadline=deadline
@@ -643,10 +706,15 @@ def run_scan(
             "diagnostics": [],
             "frameworks": [],
         }
+    _notify(
+        "python_ast:done",
+        f"{len(py_data['findings'])} finding(s), {stage_durations.get('tier2_python_ast', 0.0) * 1000:.0f}ms",
+    )
     diagnostics.extend(py_data["diagnostics"])
     analysis_boundaries.extend(py_data["analysis_boundaries"])
 
     # Stage 4: 1-pass Semgrep CE over inventory-approved code files (Branch A + C)
+    _notify("semgrep:start", "Running Semgrep CE rules (Python + JS/TS)")
     t0 = time.monotonic()
     if enable_semgrep and inventory.code_files():
         rule_files = list(rules) if rules is not None else discover_default_rule_files()
@@ -661,18 +729,41 @@ def run_scan(
     else:
         sg_result = SemgrepV1Result(status="skipped")
     stage_durations["tier1_semgrep"] = time.monotonic() - t0
+    _notify(
+        "semgrep:done",
+        f"{sg_result.status}, {stage_durations['tier1_semgrep']:.2f}s",
+    )
     diagnostics.extend(sg_result.diagnostics)
     analysis_boundaries.extend(sg_result.analysis_boundaries)
+
+    # Stage 4b: Offline SCA over approved lockfiles/manifests (K3.2 — strictly offline)
+    t0 = time.monotonic()
+    sca_result: ScaAnalysisResult = analyze_sca_offline(
+        inventory,
+        server_id=resolved_server_id,
+        osv_db=osv_db,
+        osv_db_sha256=osv_db_sha256,
+        osv_scanner=osv_scanner,
+        enabled=enable_sca,
+        deadline=deadline,
+    )
+    stage_durations["tier1_sca"] = time.monotonic() - t0
+    diagnostics.extend(sca_result.diagnostics)
+    analysis_boundaries.extend(sca_result.analysis_boundaries)
 
     # Stage 5: Deduplicate & assemble canonical ScanReport
     t0 = time.monotonic()
     raw_findings: list[Finding] = []
     raw_findings.extend(pkg_result.findings)
+    raw_findings.extend(sca_result.findings)
     raw_findings.extend(py_data["findings"])
     raw_findings.extend(sg_result.findings)
     findings = deduplicate_findings(
         raw_findings, semgrep_behavior_classes=sg_result.behavior_classes
     )
+
+    # Attach file-level install-time hook/binding.gyp provenance to findings confirmed by AST/Semgrep detectors
+    _attach_install_script_provenance(findings, pkg_result.install_script_provenance)
 
     partial_reasons: list[str] = []
     if inventory.read_errors:
@@ -688,15 +779,47 @@ def run_scan(
     if pkg_result.status == "partial":
         if any(b.kind == "budget_exceeded" for b in pkg_result.analysis_boundaries):
             partial_reasons.append("package.json analysis reached cutoff deadline")
-        if pkg_result.diagnostics:
+        if any(d.get("kind") == "package_json_parse_error" for d in pkg_result.diagnostics):
             partial_reasons.append("Malformed package.json encountered")
+        uninspected_hooks = sum(
+            1 for d in pkg_result.diagnostics if d.get("kind") == "lifecycle_script_uninspected"
+        )
+        if uninspected_hooks:
+            partial_reasons.append(
+                f"{uninspected_hooks} npm install lifecycle script target(s) could not be inspected"
+            )
+        uninspected_gyp = sum(
+            1 for d in pkg_result.diagnostics if d.get("kind") == "binding_gyp_script_uninspected"
+        )
+        if uninspected_gyp:
+            partial_reasons.append(
+                f"{uninspected_gyp} binding.gyp install-time command target(s) could not be inspected"
+            )
 
     py_files = inventory.python_files()
+    py_has_dynamic_dispatch = any(
+        b.kind == "dynamic_dispatch" for b in py_data["analysis_boundaries"]
+    )
+    py_has_unsupported_stmt = any(
+        d.get("code") == "UNSUPPORTED_PYTHON_STATEMENT" for d in py_data["diagnostics"]
+    )
     if py_files:
         if not enable_python_ast:
             partial_reasons.append("Python source files not analyzed (Python AST disabled)")
-        elif py_data["status"] in {"partial", "failed", "unavailable"}:
-            partial_reasons.append(f"Python AST engine status: {py_data['status']}")
+        else:
+            if py_data["status"] in {"partial", "failed", "unavailable"}:
+                partial_reasons.append(f"Python AST engine status: {py_data['status']}")
+            if py_has_dynamic_dispatch:
+                dd_reason = "Python AST encountered unresolved dynamic dispatch affecting coverage"
+                if dd_reason not in partial_reasons:
+                    partial_reasons.append(dd_reason)
+            if py_has_unsupported_stmt:
+                stmt_reason = "Python AST encountered unsupported statement syntax"
+                if stmt_reason not in partial_reasons:
+                    partial_reasons.append(stmt_reason)
+
+    if sca_result.engine_mode != "disabled" and sca_result.status in {"partial", "failed"}:
+        partial_reasons.append(f"Offline SCA coverage incomplete ({sca_result.status})")
 
     js_ts_files = inventory.js_ts_files()
     js_ts_surface_status: str | None = None
@@ -764,11 +887,15 @@ def run_scan(
         "bootstrap": "scanned" if (inventory.files and scan_status == "complete") else "partial",
         "config": (
             ("scanned" if pkg_result.status == "complete" else "partial")
-            if inventory.package_json_files()
+            if (inventory.package_json_files() or inventory.binding_gyp_files())
             else "none_found"
         ),
     }
     surfaces.update(py_data["surfaces"])
+    if py_files and enable_python_ast and (py_has_dynamic_dispatch or py_has_unsupported_stmt):
+        for key in ("tools", "resources", "prompts", "bootstrap"):
+            if key in surfaces and surfaces[key] == "scanned":
+                surfaces[key] = "partial"
     if py_files and not enable_python_ast:
         surfaces["python_code"] = "skipped"
     if js_ts_surface_status is not None:
@@ -783,7 +910,7 @@ def run_scan(
         read_errors=list(inventory.read_errors),
         skipped_budget=list(inventory.skipped_budget),
         surfaces=surfaces,
-        sca_status="unmeasured",
+        sca_status=sca_result.status,
         analysis_boundaries=analysis_boundaries,
     )
 
@@ -793,10 +920,23 @@ def run_scan(
         if (inventory.read_errors or inventory.timed_out or inventory.skipped_budget or uncovered_skipped)
         else "complete"
     )
+    py_engine_status = (
+        "partial"
+        if (py_data["status"] == "complete" and (py_has_dynamic_dispatch or py_has_unsupported_stmt))
+        else py_data["status"]
+    )
     engines: list[dict[str, Any]] = [
         {"name": "source_inventory", "version": __version__, "status": inv_status},
         {"name": "package_json_analyzer", "version": __version__, "status": pkg_result.status},
-        {"name": "python_ast", "version": __version__, "status": py_data["status"]},
+        {
+            "name": "sca_osv",
+            "version": __version__,
+            "mode": sca_result.engine_mode,
+            "db_sha256": sca_result.db_sha256,
+            "db_snapshot_id": sca_result.db_snapshot_id,
+            "status": "skipped" if sca_result.status == "unmeasured" else sca_result.status,
+        },
+        {"name": "python_ast", "version": __version__, "status": py_engine_status},
         {
             "name": "semgrep",
             "edition": "OSS",

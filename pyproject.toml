@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "Static analysis foundation for malicious MCP server detection"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "packaging>=23.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
 license = { text = "MIT" }
 authors = [{ name = "Malicious MCP Scanner Detection contributors" }]
 
@@ -16,6 +20,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 mcp-scanner = "mcp_scanner.cli:main"
+mac = "mcp_scanner.cli:mac_main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

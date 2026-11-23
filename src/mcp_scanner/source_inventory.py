@@ -9,6 +9,7 @@ file budget and monotonic deadline.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import time
@@ -116,12 +117,22 @@ LANGUAGE_BY_EXT: dict[str, str] = {
     ".cfg": "text",
     ".ini": "text",
     ".env": "text",
+    ".gyp": "text",
+    ".lock": "text",
 }
 
 ENTRYPOINT_NAMES: frozenset[str] = frozenset(
     {
         "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "binding.gyp",
         "pyproject.toml",
+        "poetry.lock",
+        "uv.lock",
+        "pipfile.lock",
         "requirements.txt",
         "mcp.json",
         "server.py",
@@ -137,8 +148,90 @@ ENTRYPOINT_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Build output directories that may contain the only runtime code in published npm packages
+_BUILD_OUTPUT_DIRS: frozenset[str] = frozenset({"dist", "build", "out"})
+
 # Windows error codes for access denied / sharing violation / Defender AV quarantine
 _AV_OR_PERM_WINERRORS = frozenset({5, 32, 225, 226})
+
+
+def _extract_manifest_path_strings(value: object) -> list[str]:
+    """Collect relative entrypoint path strings from package.json main/bin/exports fields."""
+    found: list[str] = []
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, dict):
+        for sub in value.values():
+            found.extend(_extract_manifest_path_strings(sub))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_extract_manifest_path_strings(item))
+    return found
+
+
+def _included_npm_build_dirs(
+    current_dir: Path,
+    entries: list[os.DirEntry[str]],
+    *,
+    max_file_bytes: int,
+) -> set[str]:
+    """Allow dist/build/out when package.json is present without a src/ tree and references them."""
+    present_build_dirs = {
+        e.name for e in entries if e.name in _BUILD_OUTPUT_DIRS
+    }
+    if not present_build_dirs:
+        return set()
+
+    has_pkg_json = False
+    has_src_dir = False
+    has_direct_code = False
+    for entry in entries:
+        low = entry.name.lower()
+        try:
+            if low == "package.json" and entry.is_file(follow_symlinks=False):
+                has_pkg_json = True
+            elif low == "src" and entry.is_dir(follow_symlinks=False):
+                has_src_dir = True
+            elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in {
+                ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"
+            }:
+                has_direct_code = True
+        except OSError:
+            continue
+
+    # Require a sibling package.json to consider build output directories
+    if not has_pkg_json:
+        return set()
+
+    pkg_path = current_dir / "package.json"
+    if _is_link_or_junction(pkg_path):
+        return set()
+
+    referenced: set[str] = set()
+    try:
+        if pkg_path.stat().st_size <= max_file_bytes:
+            payload = json.loads(pkg_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                for field_name in ("main", "module", "browser", "bin", "exports"):
+                    for raw_target in _extract_manifest_path_strings(payload.get(field_name)):
+                        norm = raw_target.strip().replace("\\", "/")
+                        while norm.startswith("./"):
+                            norm = norm[2:]
+                        first_seg = norm.split("/", 1)[0]
+                        if first_seg in present_build_dirs:
+                            referenced.add(first_seg)
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        pass
+
+    # Manifest-declared runtime entrypoints (e.g. main/bin/exports -> dist/...) are always inspected,
+    # even when src/ is also present, because Node loads the declared runtime artifact.
+    if referenced:
+        return referenced
+    # Fallback heuristic when manifest has no explicit build-dir entrypoint: only scan dist/build/out
+    # if there is neither a src/ tree nor direct root JS/TS source files.
+    if not has_src_dir and not has_direct_code:
+        return present_build_dirs
+    return set()
 
 
 @dataclass(frozen=True)
@@ -189,6 +282,32 @@ class SourceInventory:
             for record in self.files
             if Path(record.rel_path).name.lower() == "package.json"
         ]
+
+    def binding_gyp_files(self) -> list[SourceFileRecord]:
+        return [
+            record
+            for record in self.files
+            if Path(record.rel_path).name.lower() == "binding.gyp"
+        ]
+
+    def dependency_files(self) -> list[SourceFileRecord]:
+        dep_names = {
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "pyproject.toml",
+            "poetry.lock",
+            "uv.lock",
+            "pipfile.lock",
+        }
+        out: list[SourceFileRecord] = []
+        for record in self.files:
+            name = Path(record.rel_path).name.lower()
+            if name in dep_names or (name.startswith("requirements") and name.endswith(".txt")):
+                out.append(record)
+        return out
 
     def by_rel_path(self) -> dict[str, SourceFileRecord]:
         return {record.rel_path: record for record in self.files}
@@ -350,6 +469,9 @@ def collect_source_inventory(
                 )
                 continue
 
+            included_build_dirs = _included_npm_build_dirs(
+                current_dir, entries, max_file_bytes=max_file_bytes
+            )
             subdirs_to_visit: list[Path] = []
             for entry in entries:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -385,7 +507,7 @@ def collect_source_inventory(
                     continue
 
                 if is_dir:
-                    if entry.name in IGNORED_DIRS:
+                    if entry.name in IGNORED_DIRS and entry.name not in included_build_dirs:
                         skipped_files.append(SkippedFile(path=rel_path, reason="ignored_directory"))
                         continue
                     subdirs_to_visit.append(entry_path)
