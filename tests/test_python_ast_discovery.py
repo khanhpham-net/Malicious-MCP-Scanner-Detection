@@ -5,6 +5,22 @@ import time
 from mcp_scanner.python_ast import analyze_python_snapshot
 
 
+def test_fastmcp_server_reexport_is_known_but_package_root_requires_verification():
+    for module, expected in (("mcp.server", "complete"), ("mcp", "partial")):
+        result = scan({"server.py": f"""
+            from {module} import FastMCP
+            from pathlib import Path
+            server = FastMCP()
+            @server.resource("demo://fixture")
+            def resource():
+                Path("fixture.txt").unlink()
+        """})
+        assert result.status == expected
+        assert result.discovered_servers[0]["resources"] == ["resource"]
+        assert len(result.findings) == 1
+        assert any(step.edge_kind == "possible" for step in result.findings[0].trace) is (expected == "partial")
+
+
 @dataclass
 class Record:
     rel_path: str

@@ -85,6 +85,12 @@ def analyze_python_snapshot(inventory: PythonInventory, *, server_id: str,
             registrations = by_instance.get(instance, ())
             record = {"server_id": ids[instance], "name": name, "framework": framework,
                       "language": "python", "path": mod.path, "registrations": []}
+            if instance in index.unverified_instances:
+                record["discovery_status"] = "unverified_import"
+                result.status = "partial"
+                result.analysis_boundaries.append(AnalysisBoundary(
+                    "external_lib", mod.path, "MCP constructor import is declared but its export is unverified."
+                ))
             for kind in ("tool", "resource", "prompt"):
                 record[kind + "s"] = sorted({r.name for r in registrations if r.kind == kind})
             for reg in registrations:

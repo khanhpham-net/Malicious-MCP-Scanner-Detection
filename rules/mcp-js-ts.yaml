@@ -303,7 +303,7 @@ rules:
               - pattern: readFile($PATH, ...)
           - metavariable-regex:
               metavariable: $PATH
-              regex: '(?i).*(\.ssh|\.aws|\.npmrc|\.env|id_rsa|credentials|secret|token).*'
+              regex: '(?i).*(\.ssh|\.aws|\.npmrc|(?:^|[''"/\\])\.env|id_rsa|credentials|secret|token).*'
     pattern-sinks:
       - pattern-either:
           - pattern: fetch($URL, ...)
@@ -331,4 +331,4 @@ rules:
           - pattern: readFile($PATH, ...)
       - metavariable-regex:
           metavariable: $PATH
-          regex: '(?i).*(\.ssh|\.aws|\.npmrc|\.env|id_rsa|credentials).*'
+          regex: '(?i).*(\.ssh|\.aws|\.npmrc|(?:^|[''"/\\])\.env|id_rsa|credentials).*'
