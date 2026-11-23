@@ -32,6 +32,12 @@ from .models import (
     compute_exit_code,
     stable_sha256_id,
 )
+from .p_detector import PDetectionResult, detect_surface_instructions
+from .p_surface import extract_python_tool_descriptions
+from .p_schema import extract_python_input_schema_descriptions
+from .p_resource import extract_python_resource_metadata, extract_python_resource_bodies
+from .p_prompt import extract_python_prompt_metadata, extract_python_prompt_messages
+from .p_tool_result import extract_python_tool_results
 from .package_json_analyzer import PackageJsonAnalysisResult, analyze_package_json_files
 from .semgrep_adapter import (
     SemgrepV1Result,
@@ -492,6 +498,7 @@ def run_scan(
     windows_temp: Path | None = None,
     enable_semgrep: bool = True,
     enable_python_ast: bool = True,
+    enable_p_detector: bool = True,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_files: int = DEFAULT_MAX_FILES,
     budget_cutoff_seconds: float = DEFAULT_BUDGET_CUTOFF_SECONDS,
@@ -646,6 +653,68 @@ def run_scan(
     diagnostics.extend(py_data["diagnostics"])
     analysis_boundaries.extend(py_data["analysis_boundaries"])
 
+    # Analyze supported English Python metadata through shared P rules.
+    t0 = time.monotonic()
+    p_result = PDetectionResult()
+    p_status = "skipped"
+    p_surfaces = {
+        "tool_description": "skipped",
+        "input_schema_description": "skipped",
+        "resource_metadata": "skipped",
+        "resource_body": "skipped",
+        "prompt_metadata": "skipped",
+        "prompt_message": "skipped",
+        "tool_result": "skipped",
+    }
+    if enable_p_detector and inventory.python_files():
+        if not enable_python_ast or py_data["status"] in {"failed", "unavailable"}:
+            p_result.status = "partial"
+            p_result.diagnostics.append({
+                "code": "P_DISCOVERY_UNAVAILABLE",
+                "message": "Python discovery is required for P metadata analysis.",
+            })
+            p_surfaces = {key: "partial" for key in p_surfaces}
+        else:
+            extractors = (
+                ("tool_description", extract_python_tool_descriptions),
+                ("input_schema_description", extract_python_input_schema_descriptions),
+                ("resource_metadata", extract_python_resource_metadata),
+                ("resource_body", extract_python_resource_bodies),
+                ("prompt_metadata", extract_python_prompt_metadata),
+                ("prompt_message", extract_python_prompt_messages),
+                ("tool_result", extract_python_tool_results),
+            )
+            for surface, extract in extractors:
+                try:
+                    extracted = extract(inventory, py_data["discovered_servers"], deadline=deadline)
+                    detected = detect_surface_instructions(extracted.texts, deadline=deadline)
+                    p_result.findings.extend(detected.findings)
+                    p_result.diagnostics.extend(extracted.diagnostics)
+                    p_result.diagnostics.extend(detected.diagnostics)
+                    if "partial" in {extracted.status, detected.status, py_data["status"]}:
+                        p_result.status = "partial"
+                        p_surfaces[surface] = "partial"
+                    else:
+                        p_surfaces[surface] = "scanned" if extracted.texts else "none_found"
+                except Exception as error:
+                    p_result.status = "partial"
+                    p_surfaces[surface] = "failed"
+                    p_result.diagnostics.append({
+                        "code": "P_ANALYSIS_ERROR", "surface": surface,
+                        "message": f"{type(error).__name__}: P metadata analysis failed.",
+                    })
+        p_status = p_result.status
+    elif enable_p_detector:
+        p_surfaces = {key: "unmeasured" for key in p_surfaces}
+    diagnostics.extend(p_result.diagnostics)
+    if any(d.get("code") in {"P_SCHEMA_EXTRACTION_BUDGET", "P_EXTRACTION_DEADLINE", "P_DETECTION_DEADLINE", "P_RESOURCE_EXTRACTION_BUDGET", "P_PROMPT_EXTRACTION_BUDGET", "P_OUTPUT_EXTRACTION_BUDGET"}
+           for d in p_result.diagnostics):
+        analysis_boundaries.append(AnalysisBoundary(
+            kind="budget_exceeded", location=None,
+            detail="P metadata analysis reached its time or complexity budget.",
+        ))
+    stage_durations["tier2_p_descriptions"] = time.monotonic() - t0
+
     # Stage 4: 1-pass Semgrep CE over inventory-approved code files (Branch A + C)
     t0 = time.monotonic()
     if enable_semgrep and inventory.code_files():
@@ -670,11 +739,14 @@ def run_scan(
     raw_findings.extend(pkg_result.findings)
     raw_findings.extend(py_data["findings"])
     raw_findings.extend(sg_result.findings)
+    raw_findings.extend(p_result.findings)
     findings = deduplicate_findings(
         raw_findings, semgrep_behavior_classes=sg_result.behavior_classes
     )
 
     partial_reasons: list[str] = []
+    if p_status in {"partial", "failed"}:
+        partial_reasons.append(f"P metadata analysis status: {p_status}")
     if inventory.read_errors:
         partial_reasons.append(f"{len(inventory.read_errors)} file(s) unreadable (IO/AV error)")
     if inventory.skipped_budget:
@@ -769,6 +841,7 @@ def run_scan(
         ),
     }
     surfaces.update(py_data["surfaces"])
+    surfaces.update({f"p_{key}": value for key, value in p_surfaces.items()})
     if py_files and not enable_python_ast:
         surfaces["python_code"] = "skipped"
     if js_ts_surface_status is not None:
@@ -797,6 +870,13 @@ def run_scan(
         {"name": "source_inventory", "version": __version__, "status": inv_status},
         {"name": "package_json_analyzer", "version": __version__, "status": pkg_result.status},
         {"name": "python_ast", "version": __version__, "status": py_data["status"]},
+        *[
+            {"name": f"p_{surface}", "version": "0.1",
+             "status": {"scanned": "complete", "none_found": "complete",
+                        "unmeasured": "skipped"}.get(status, status),
+             "language": "en", "scope": f"python-{surface}-heuristics"}
+            for surface, status in p_surfaces.items()
+        ],
         {
             "name": "semgrep",
             "edition": "OSS",

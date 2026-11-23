@@ -1,0 +1,277 @@
+{
+  "contract_version": "1.0",
+  "artifact_type": "scan_report",
+  "generated_at": "2026-11-22T19:17:17.499005Z",
+  "scanner": {
+    "name": "mcp-scanner",
+    "version": "0.1.0",
+    "profile": "static-default",
+    "ruleset_sha256": null,
+    "policy_version": "trust-policy-v1.0",
+    "owasp_profile": "OWASP-MCP-Top-10-2025-beta",
+    "engines": [
+      {
+        "name": "source_inventory",
+        "version": "0.1.0",
+        "status": "complete"
+      },
+      {
+        "name": "package_json_analyzer",
+        "version": "0.1.0",
+        "status": "skipped"
+      },
+      {
+        "name": "python_ast",
+        "version": "0.1.0",
+        "status": "complete"
+      },
+      {
+        "name": "p_tool_description",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-tool_description-heuristics"
+      },
+      {
+        "name": "p_input_schema_description",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-input_schema_description-heuristics"
+      },
+      {
+        "name": "p_resource_metadata",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-resource_metadata-heuristics"
+      },
+      {
+        "name": "p_resource_body",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-resource_body-heuristics"
+      },
+      {
+        "name": "p_prompt_metadata",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-prompt_metadata-heuristics"
+      },
+      {
+        "name": "p_prompt_message",
+        "version": "0.1",
+        "status": "complete",
+        "language": "en",
+        "scope": "python-prompt_message-heuristics"
+      },
+      {
+        "name": "p_tool_result",
+        "version": "0.1",
+        "status": "partial",
+        "language": "en",
+        "scope": "python-tool_result-heuristics"
+      },
+      {
+        "name": "semgrep",
+        "edition": "OSS",
+        "version": null,
+        "exit_code": null,
+        "status": "skipped"
+      }
+    ]
+  },
+  "input_provenance": {
+    "server_id": "SIM076",
+    "source_id": null,
+    "input_kind": "local_directory",
+    "location": "D:\\Capstone\\mcp-scanner-ieu\\dataset\\MCP-SIM-100\\samples\\SIM076",
+    "revision": null,
+    "package_name": null,
+    "package_version": null,
+    "snapshot_sha256": "sha256:9a86ef0ef40b9719a7344d8a1a39aed3701633a3ef9cfca55c36ba731549cdbc",
+    "languages": [
+      "python"
+    ],
+    "frameworks": [
+      "fastmcp"
+    ]
+  },
+  "scan_status": "partial",
+  "policy_status": "not_evaluated",
+  "exit_code": 2,
+  "coverage": {
+    "files_discovered": 4,
+    "files_scanned": 4,
+    "scanned_files": [
+      "mcp.json",
+      "pyproject.toml",
+      "server.py",
+      "tools.json"
+    ],
+    "skipped_files": [],
+    "read_errors": [],
+    "skipped_budget": [],
+    "surfaces": {
+      "bootstrap": "scanned",
+      "config": "none_found",
+      "p_input_schema_description": "none_found",
+      "p_prompt_message": "none_found",
+      "p_prompt_metadata": "none_found",
+      "p_resource_body": "none_found",
+      "p_resource_metadata": "none_found",
+      "p_tool_description": "scanned",
+      "p_tool_result": "partial",
+      "prompts": "scanned",
+      "resources": "scanned",
+      "tools": "scanned"
+    },
+    "sca_status": "unmeasured",
+    "analysis_boundaries": [
+      {
+        "kind": "runtime_only_unobserved",
+        "location": null,
+        "detail": "Static/snapshot scan only; runtime-only behavior is not executed or observed."
+      }
+    ]
+  },
+  "telemetry": {
+    "elapsed_seconds": 0.1279,
+    "stage_durations_seconds": {
+      "tier1_inventory": 0.1144,
+      "tier1_package_json": 0.0001,
+      "tier1_semgrep": 0.0,
+      "tier2_p_descriptions": 0.0057,
+      "tier2_python_ast": 0.0075,
+      "tier4_report": 0.0002
+    },
+    "budget_cutoff_seconds": 50.0,
+    "hard_timeout_seconds": 60.0,
+    "timed_out": false,
+    "llm_triage": {
+      "enabled": false,
+      "status": "disabled",
+      "model_id": null,
+      "prompt_hash": null,
+      "tokens_used": 0,
+      "estimated_cost_usd": 0.0
+    }
+  },
+  "discovered_servers": [
+    {
+      "server_id": "SIM076",
+      "name": "palettes-detail",
+      "framework": "fastmcp",
+      "language": "python",
+      "path": "server.py",
+      "registrations": [
+        {
+          "kind": "tool",
+          "name": "preview_palette",
+          "handler": "preview_palette",
+          "declaration_span": {
+            "path": "server.py",
+            "start_line": 80,
+            "start_col": 2,
+            "end_line": 80,
+            "end_col": 12
+          },
+          "handler_span": {
+            "path": "server.py",
+            "start_line": 81,
+            "start_col": 1,
+            "end_line": 86,
+            "end_col": 54
+          },
+          "readOnlyHint": null,
+          "destructiveHint": null
+        },
+        {
+          "kind": "tool",
+          "name": "list_palettes",
+          "handler": "list_palettes",
+          "declaration_span": {
+            "path": "server.py",
+            "start_line": 88,
+            "start_col": 2,
+            "end_line": 88,
+            "end_col": 12
+          },
+          "handler_span": {
+            "path": "server.py",
+            "start_line": 89,
+            "start_col": 1,
+            "end_line": 91,
+            "end_col": 34
+          },
+          "readOnlyHint": null,
+          "destructiveHint": null
+        }
+      ],
+      "tools": [
+        "list_palettes",
+        "preview_palette"
+      ],
+      "resources": [],
+      "prompts": []
+    }
+  ],
+  "trust_score": {
+    "score_scope": "provisional",
+    "observed_score": 100,
+    "displayed_score": 60,
+    "provisional_cap": 60,
+    "policy_version": "trust-policy-v1.0",
+    "reason": "Provisional score capped at 60: P metadata analysis status: partial",
+    "contributing_finding_ids": []
+  },
+  "executive_summary": {
+    "tldr": "Partial static scan completed with 0 actionable finding(s); trust score is provisional (60/100, observed 100/100).",
+    "severity_counts": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "owasp_counts": {},
+    "top_5": []
+  },
+  "findings": [],
+  "review_queue": {
+    "requires_review": true,
+    "priority_tier": "p1_partial_coverage",
+    "reasons": [
+      "P metadata analysis status: partial"
+    ],
+    "status": "pending"
+  },
+  "diagnostics": [
+    {
+      "code": "P_OUTPUT_UNSUPPORTED_CALL",
+      "component": "tool:preview_palette",
+      "server_id": "SIM076",
+      "location": {
+        "path": "server.py",
+        "start_line": 86,
+        "start_col": 12,
+        "end_line": 86,
+        "end_col": 54
+      }
+    },
+    {
+      "code": "P_OUTPUT_UNSUPPORTED_CALL",
+      "component": "tool:list_palettes",
+      "server_id": "SIM076",
+      "location": {
+        "path": "server.py",
+        "start_line": 91,
+        "start_col": 12,
+        "end_line": 91,
+        "end_col": 34
+      }
+    }
+  ]
+}

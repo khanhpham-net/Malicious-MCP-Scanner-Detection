@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="write canonical v1.0 JSON report to file instead of stdout",
     )
+    scan.add_argument("--no-p-detector", action="store_true",
+                      help="disable English Python tool-description P heuristics")
     scan.add_argument("--server-id", help="stable server identifier override")
     scan.add_argument("--source-id", help="upstream source identifier (e.g. github:org/repo)")
     scan.add_argument(
@@ -178,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             windows_temp=args.windows_temp,
             enable_semgrep=not args.no_semgrep,
             enable_python_ast=not args.no_python_ast,
+            enable_p_detector=not args.no_p_detector,
             max_file_bytes=args.max_file_bytes,
             max_files=args.max_files,
             budget_cutoff_seconds=args.cutoff,
