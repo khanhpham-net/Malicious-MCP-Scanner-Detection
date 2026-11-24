@@ -16,8 +16,10 @@ class NonTextValue:
 
 @dataclass(frozen=True)
 class SequenceDomain:
-    """Unbounded sequence with an analyzed element domain."""
+    """Validated finite sequence with an element domain and optional bounds."""
     element: Any
+    min_length: int = 0
+    max_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -58,3 +60,32 @@ class BuiltinType:
 @dataclass(frozen=True)
 class BuiltinFunction:
     name: str
+
+
+@dataclass(frozen=True)
+class RaisedValue:
+    """A modeled builtin exception, distinct from successful returned data."""
+    exception: str
+    message: Any
+    span: SourceSpan
+
+
+class StaticRaised(Exception):
+    """Internal interpreter control transfer; never an executed target raise."""
+    def __init__(self, value):
+        self.value = value
+        super().__init__("modeled static exception")
+
+
+@dataclass(frozen=True)
+class CaughtException:
+    """A caught builtin exception; not interchangeable with its string value."""
+    exception: str
+    message: Any
+    span: SourceSpan
+
+
+@dataclass(frozen=True)
+class AnnotationValue:
+    """Pure trusted Field metadata; not a modeled MCP output object."""
+    kind: str = "pydantic-field"

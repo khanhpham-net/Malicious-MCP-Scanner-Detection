@@ -109,6 +109,73 @@ def extract_python_tool_descriptions(
                     nodes_by_path[span.path] = {}
         return nodes_by_path[span.path].get((span.start_line, span.start_col))
 
+    def declaration_value(node, path, declaration):
+        from .p_static import StaticValueResolver, StaticText, StaticPath
+        from .python_ast.index import Module, module_name
+        class LiteralImports(StaticValueResolver):
+            def parse(self,span):
+                parsed=super().parse(span)
+                if parsed:
+                    module,_,bindings=parsed
+                    opaque=False
+                    for statement in module.tree.body:
+                        if isinstance(statement,(ast.Assign,ast.AnnAssign)):
+                            expressions=[statement.value] if statement.value is not None else []
+                        elif isinstance(statement,(ast.FunctionDef,ast.AsyncFunctionDef)):
+                            expressions=[*statement.decorator_list,*statement.args.defaults,
+                                         *[v for v in statement.args.kw_defaults if v is not None]]
+                            expressions += [arg.annotation for arg in [*statement.args.posonlyargs,*statement.args.args,*statement.args.kwonlyargs] if arg.annotation is not None]
+                            if statement.returns is not None:expressions.append(statement.returns)
+                        elif isinstance(statement,(ast.Import,ast.ImportFrom,ast.Pass)):
+                            expressions=[]
+                        elif isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Constant):
+                            expressions=[]
+                        else:
+                            opaque=True;break
+                        if any(isinstance(n,(ast.Call,ast.Await,ast.NamedExpr)) for expr in expressions for n in ast.walk(expr)):
+                            opaque=True;break
+                    if opaque:
+                        for key in list(bindings):
+                            bindings[key]=self.unknown("P_DYNAMIC_DESCRIPTION",module,module.tree.body[-1])
+                return parsed
+        resolver=LiteralImports(inventory,deadline)
+        record=records.get(path)
+        if record is None or record.text is None:
+            return None
+        tree=ast.parse(record.text.removeprefix("\ufeff"),filename=path)
+        module=Module(path,module_name(path),tree)
+        env={"__file__":StaticPath(path,True)}
+        for statement in tree.body:
+            resolver.tick()
+            if getattr(statement,"lineno",0)>=declaration.start_line:
+                break
+            if isinstance(statement,(ast.Import,ast.ImportFrom)):
+                module.add_import(statement,module.aliases)
+                for alias in statement.names:
+                    local=alias.asname or (alias.name.partition(".")[0] if isinstance(statement,ast.Import) else alias.name)
+                    env.pop(local,None)
+            elif isinstance(statement,(ast.Assign,ast.AnnAssign)):
+                targets=statement.targets if isinstance(statement,ast.Assign) else [statement.target]
+                if statement.value is None:
+                    continue
+                value=resolver.value(module,statement.value,env)
+                from .p_static import UnresolvedValue
+                trusted_constructor=(isinstance(statement.value,ast.Call) and
+                    module.qualify(ast.unparse(statement.value.func)) in {
+                        "mcp.server.fastmcp.FastMCP","mcp.server.fastmcp.server.FastMCP","fastmcp.FastMCP"})
+                if isinstance(statement.value,ast.Call) and isinstance(value,UnresolvedValue) and not trusted_constructor:
+                    for name in list(env):
+                        env[name]=resolver.unknown("P_DYNAMIC_DESCRIPTION",module,statement)
+                for target in targets:
+                    if isinstance(target,ast.Name):
+                        env[target.id]=value
+            elif isinstance(statement,(ast.If,ast.For,ast.While,ast.Try,ast.With,ast.Expr)) and not (
+                    isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Constant)):
+                # Opaque initializers/control flow cannot prove earlier bindings.
+                for name in list(env):
+                    env[name]=resolver.unknown("P_DYNAMIC_DESCRIPTION",module,statement)
+        return resolver.value(module,node,env)
+
     for server in discovered_servers:
         for registration in server.get("registrations", []):
             if registration["kind"] != "tool":
@@ -141,15 +208,29 @@ def extract_python_tool_descriptions(
                 text_node = explicit
                 text_path = declaration.path
             else:
-                problem("P_DYNAMIC_DESCRIPTION", declaration)
-                continue
+                from .p_static import StaticText
+                try:
+                    resolved=declaration_value(explicit,declaration.path,declaration)
+                except (TimeoutError,RecursionError):
+                    problem("P_EXTRACTION_DEADLINE",declaration)
+                    return result
+                if isinstance(resolved,StaticText):
+                    text_node=resolved if resolved.value else docstring
+                    text_path=declaration.path if resolved.value else handler_span.path
+                elif resolved is None:
+                    text_node=docstring
+                    text_path=handler_span.path
+                else:
+                    problem("P_DYNAMIC_DESCRIPTION", declaration)
+                    continue
             if text_node is None:
                 # A tool with no description is an observed empty surface.
                 text = ""
                 content_span = handler_span
             else:
+                from .p_static import StaticText
                 text = text_node.value
-                content_span = location(text_path, text_node)
+                content_span = text_node.span if isinstance(text_node,StaticText) else location(text_path, text_node)
             result.texts.append(SurfaceText(
                 server_id=server["server_id"],
                 component=f"tool:{registration['name']}",

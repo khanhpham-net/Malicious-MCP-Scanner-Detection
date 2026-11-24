@@ -5,7 +5,7 @@ import ast
 from copy import deepcopy
 
 from .models import TraceStep
-from .p_domains import FlowOutcome, NonTextValue, SequenceDomain, RuntimeInputText
+from .p_domains import FlowOutcome, NonTextValue, SequenceDomain, RuntimeInputText, RaisedValue, StaticRaised, CaughtException
 from .p_static import StaticFile, StaticText, UnresolvedValue
 from .p_snapshot_io import BinaryFile
 from .python_ast.index import dotted, location
@@ -103,7 +103,17 @@ class ControlFlowMixin:
                     following.append(state)
                     continue
                 self.activate(state)
-                following.extend(self.statement_paths(module, statement, state.env))
+                raised = []
+                self.raise_frames.append(raised)
+                try:
+                    following.extend(self.statement_paths(module, statement, state.env))
+                except StaticRaised as transfer:
+                    value = transfer.value
+                    following.append(self.outcome("raise", state.env, value.message,
+                                                  value.span, value.exception))
+                finally:
+                    self.raise_frames.pop()
+                following.extend(raised)
                 if len(following) > self.MAX_PATHS:
                     gap = self.unknown("P_OUTPUT_PATH_LIMIT", module, statement)
                     return [s for s in following if s.kind == "return"][:self.MAX_PATHS] + [
@@ -160,8 +170,10 @@ class ControlFlowMixin:
         items = self.sequence_items(iterable)
         if items is None or len(items) > self.MAX_LOOP_ITEMS:
             gap = self.unknown("P_OUTPUT_LOOP_BOUNDARY", module, statement)
-            # Keep the gap. An unbounded loop is never certified by one iteration.
-            return [self.outcome("unknown", env, gap, location(module.path, statement))]
+            summary = self.summarize_for(module,statement,env,iterable)
+            if summary is not None:
+                return summary
+            return self.resume_unknown(module,statement,env,gap)
         states = [self.outcome("next", env)]
         finished = []
         for item in items:
@@ -205,8 +217,10 @@ class ControlFlowMixin:
                     continue
                 if truth is None:
                     # Unknown iteration count requires a loop summary, not a clean verdict.
-                    finished.append(self.outcome("unknown", state.env,
-                        self.unknown("P_OUTPUT_LOOP_BOUNDARY", module, statement)))
+                    gap=self.unknown("P_OUTPUT_LOOP_BOUNDARY",module,statement)
+                    # Zero iterations or a later normal exit remain possible;
+                    # retain the boundary and inspect independent tail returns.
+                    finished.extend(self.resume_unknown(module,statement,state.env,gap))
                     continue
                 for result in self.block_paths(module, statement.body, state.env):
                     if result.kind in {"next", "continue"}:
@@ -245,8 +259,108 @@ class ControlFlowMixin:
         for key in env:
             env[key] = close(env[key])
 
+    def exception_names(self, module, node):
+        """Resolve only unshadowed builtin catch types; None means unknown."""
+        if node is None:
+            return ("BaseException",)
+        nodes = node.elts if isinstance(node, ast.Tuple) else [node]
+        names = []
+        known = {"BaseException", "Exception", "ValueError", "TypeError",
+                 "RuntimeError", "KeyError", "IndexError", "LookupError",
+                 "AssertionError", "OSError", "PermissionError", "FileNotFoundError"}
+        for item in nodes:
+            qualified = module.qualify(dotted(item))
+            leaf = qualified.removeprefix("builtins.")
+            if leaf not in known or self.lookup(module, qualified):
+                return None
+            names.append(leaf)
+        return tuple(names)
+
+    def exception_matches(self, actual, expected):
+        parents = {"KeyError": "LookupError", "IndexError": "LookupError",
+                   "PermissionError": "OSError", "FileNotFoundError": "OSError"}
+        name = actual.removeprefix("builtins.")
+        return any(n in {name, parents.get(name), "Exception", "BaseException"} for n in expected)
+
+    def try_paths(self, module, statement, env):
+        outcomes = self.block_paths(module, statement.body, env)
+        handled = []
+        for state in outcomes:
+            self.activate(state)
+            if state.kind == "next":
+                handled.extend(self.block_paths(module, statement.orelse, state.env))
+                continue
+            def uncertain(value):
+                from .p_output_flow import PossibleValues, StaticMapping
+                if isinstance(value, UnresolvedValue):
+                    return value.code != "P_OUTPUT_RUNTIME_PARAMETER"
+                if isinstance(value, PossibleValues):
+                    return value.uncertainty is not None or any(uncertain(v) for v in value.values)
+                if isinstance(value, StaticMapping):
+                    return any(uncertain(v) for _,v in value.entries.values())
+                if isinstance(value, list):
+                    return any(uncertain(v) for v in value)
+                return False
+            unresolved = state.kind == "unknown" or state.kind == "return" and uncertain(state.value)
+            if state.kind != "raise" and not unresolved:
+                handled.append(state)
+                continue
+            matched = False
+            for handler in statement.handlers:
+                expected = self.exception_names(module, handler.type)
+                if expected is None:
+                    handled.append(self.outcome("unknown", state.env,
+                        self.unknown("P_OUTPUT_EXCEPTION_TYPE", module, handler)))
+                if unresolved or expected is None or self.exception_matches(state.exception or "", expected):
+                    self.activate(state)
+                    local = self.fork_environment(state.env)
+                    if handler.name:
+                        local[handler.name] = (self.unknown("P_OUTPUT_EXCEPTION_OBJECT", module, handler)
+                            if unresolved or expected is None else
+                            CaughtException(state.exception, state.value, state.span))
+                    handled.extend(self.block_paths(module, handler.body, local))
+                    if not unresolved and expected is not None:
+                        matched = True
+                        break
+            if unresolved or not matched:
+                handled.append(state)
+        finished = []
+        for state in handled:
+            self.activate(state)
+            if not statement.finalbody:
+                finished.append(state)
+                continue
+            for final in self.block_paths(module, statement.finalbody, state.env):
+                if final.kind == "next":
+                    final.kind, final.value, final.span, final.exception = (
+                        state.kind, state.value, state.span, state.exception)
+                finished.append(final)
+        if len(finished) > self.MAX_PATHS:
+            gap = self.unknown("P_OUTPUT_PATH_LIMIT", module, statement)
+            return finished[:self.MAX_PATHS] + [self.outcome("unknown", env, gap)]
+        return finished
+
     def statement_paths(self, module, statement, env):
         self.tick()
+        if isinstance(statement, ast.Try):
+            return self.try_paths(module, statement, env)
+        if isinstance(statement, ast.AugAssign):
+            left = self.value(module, statement.target, env)
+            right = self.value(module, statement.value, env)
+            expression = ast.copy_location(ast.BinOp(left=statement.target, op=statement.op, right=statement.value), statement)
+            value = self.lift(module, expression, lambda a, b: self.binary(module, expression, a, b), left, right)
+            from .p_output_flow import StaticSet
+            if isinstance(left, list) and isinstance(right, list) and isinstance(statement.op, ast.Add) and isinstance(value, list):
+                left[:] = value
+                value = left
+            elif isinstance(left, StaticSet) and isinstance(value, StaticSet):
+                left.values[:] = value.values
+                value = left
+            if isinstance(value, UnresolvedValue):
+                self.pending_gaps.append(value)
+            if self.bind_target(module, statement.target, value, env):
+                return [self.outcome("next", env)]
+            return [self.outcome("unknown", env, self.unknown("P_OUTPUT_ASSIGNMENT_BINDING", module, statement))]
         if isinstance(statement, ast.Assign):
             value=self.value(module,statement.value,env)
             if all(self.bind_target(module,t,value,env) for t in statement.targets):
@@ -255,7 +369,7 @@ class ControlFlowMixin:
         if isinstance(statement, ast.Expr) and isinstance(statement.value,ast.Call):
             value=self.value(module,statement.value,env)
             if isinstance(value,UnresolvedValue):
-                return [self.outcome("unknown",env,value,location(module.path,statement))]
+                return self.resume_unknown(module,statement,env,value)
             return [self.outcome("next",env)]
         if isinstance(statement, ast.If):
             return self.branch_paths(module, statement, env)
@@ -290,7 +404,13 @@ class ControlFlowMixin:
             item = statement.items[0]
             value = self.value(module, item.context_expr, env)
             if not isinstance(value, (StaticFile,BinaryFile)) or not isinstance(item.optional_vars, ast.Name):
-                return [self.outcome("unknown", env, self.unknown("P_OUTPUT_UNSUPPORTED_BODY", module, statement))]
+                gap = self.unknown("P_OUTPUT_UNSUPPORTED_BODY",module,statement)
+                states = self.resume_unknown(module,statement,env,gap)
+                results = [states[0]]
+                if isinstance(item.optional_vars,ast.Name):
+                    env[item.optional_vars.id] = gap
+                results.extend(self.block_paths(module,statement.body,env))
+                return results
             env[item.optional_vars.id] = value
             results = self.block_paths(module, statement.body, env)
             for result in results:
@@ -308,6 +428,10 @@ class ControlFlowMixin:
         from .p_output_flow import StaticMapping,StaticInstance,StaticSet,PossibleValues
         self.tick()
         seen=set() if seen is None else seen
+        if isinstance(value,SequenceDomain):
+            return ("sequence",self.semantic_key(value.element,seen),value.min_length,value.max_length)
+        if isinstance(value,(RaisedValue,CaughtException)):
+            return ("exception",value.exception,self.semantic_key(value.message,seen))
         if isinstance(value,StaticText):return ("text",value.value)
         if value is None or type(value) in {str,int,float,bool}:return (type(value).__name__,value)
         if id(value) in seen:return ("cycle",type(value).__name__)
@@ -352,31 +476,28 @@ class ControlFlowMixin:
 
     def body(self, module, statements, env):
         from .p_output_flow import PossibleValues
-        origin=self.outcome("next",env)
+        origin = self.outcome("next", env)
         outcomes = self.block_paths(module, statements, env)
-        if self.active_calls:
-            for state in outcomes:
-                if state.kind=="raise":
-                    self.pending_error_texts.append(state.value)
-                    self.pending_gaps.append(self.unknown("P_OUTPUT_HELPER_EXCEPTION",module,statements[-1]))
-        if len(outcomes) == 1:
-            state = outcomes[0]
-            self.activate(state)
-            if state.kind in {"return", "raise", "unknown"}:
-                return state.value, state.span
-            if state.kind == "next":
-                return None, None
         values = []
-        for outcome in outcomes:
-            self.activate(outcome)
-            value = outcome.value
-            if outcome.kind in {"next", "return", "raise", "unknown"}:
-                if outcome.span and outcome.kind in {"return", "raise"}:
-                    step = TraceStep("sink", outcome.span, symbol="possible return path", edge_kind="possible")
-                    value = self.decorate(value, step)
-                values.append(value)
-            else:
-                values.append(self.unknown("P_OUTPUT_INVALID_CONTROL_FLOW", module, statements[-1]))
-        self.merge_branch_effects(module,statements[-1],env,outcomes)
+        for state in outcomes:
+            self.activate(state)
+            value = state.value
+            if state.kind == "raise":
+                if self.active_calls:
+                    value = RaisedValue(state.exception, value, state.span)
+                else:
+                    self.pending_error_texts.append(value)
+                    value = None
+            elif state.kind not in {"next", "return", "unknown"}:
+                value = self.unknown("P_OUTPUT_INVALID_CONTROL_FLOW", module, statements[-1])
+            if len(outcomes) > 1 and state.span and state.kind in {"return", "raise"}:
+                value = self.decorate(value, TraceStep(
+                    "sink", state.span, symbol="possible return/exception path", edge_kind="possible"))
+            values.append(value)
+        if len(outcomes) == 1:
+            self.activate(outcomes[0])
+            return values[0], outcomes[0].span
+        if statements:
+            self.merge_branch_effects(module, statements[-1], env, outcomes)
         self.activate(origin)
         return PossibleValues(tuple(values), None), None

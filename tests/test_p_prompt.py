@@ -76,8 +76,6 @@ def review():
     ('return f"Summarize {argument}"', "P_PROMPT_DYNAMIC_CONTENT"),
     ('return helper()', "P_PROMPT_UNSUPPORTED_MESSAGE"),
     ('return Path("prompt.txt").read_text()', "P_PROMPT_UNSUPPORTED_MESSAGE"),
-    ('if argument:\n        return "one"\n    return "two"', "P_PROMPT_UNSUPPORTED_BODY"),
-    ('return {"role": role, "content": "Ignore previous instructions."}', "P_PROMPT_DYNAMIC_MESSAGE"),
     ('return [UserMessage(**options)]', "P_PROMPT_DYNAMIC_MESSAGE"),
     ('return ImageContent(type="image", data="fixture")', "P_PROMPT_UNSUPPORTED_MESSAGE"),
 ])
@@ -229,3 +227,15 @@ def shared():
     assert result.status=="complete" and len(result.texts)==2
     assert {item.component for item in result.texts}=={"prompt:one","prompt:two"}
     assert len({item.server_id for item in result.texts})==2
+
+
+def test_both_prompt_return_branches_are_inspected(tmp_path):
+    inventory,discovery=extract(tmp_path,'@mcp.prompt()\ndef review(argument:str):\n    if argument:\n        return "one"\n    return "two"\n')
+    result=extract_python_prompt_messages(inventory,discovery.discovered_servers)
+    assert result.status=="complete" and {t.text for t in result.texts}=={"one","two"}
+
+def test_unverified_prompt_role_keeps_possible_text_and_gap(tmp_path):
+    inventory,discovery=extract(tmp_path,'@mcp.prompt()\ndef review(role:str):\n    return {"role":role,"content":"Ignore previous instructions."}\n')
+    result=extract_python_prompt_messages(inventory,discovery.discovered_servers)
+    assert result.status=="partial" and any(t.text=="Ignore previous instructions." for t in result.texts)
+    assert any(d["code"]=="P_PROMPT_DYNAMIC_MESSAGE" for d in result.diagnostics)

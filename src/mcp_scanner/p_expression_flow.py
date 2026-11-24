@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
+from dataclasses import replace
 from itertools import product
 import operator
 
 from .models import SourceSpan, TraceStep
-from .p_domains import ClassSymbol, NonTextValue, SequenceDomain, StaticLambda, RuntimeInputText, BuiltinType, BuiltinFunction
+from .p_domains import ClassSymbol, NonTextValue, SequenceDomain, StaticLambda, RuntimeInputText, BuiltinType, BuiltinFunction, RaisedValue, StaticRaised, CaughtException, AnnotationValue
 from .p_static import StaticText, UnresolvedValue
+from .p_text_constraints import ValidatedToken, ascii_token_pattern
 from .python_ast.index import dotted, location
 
 
@@ -73,6 +75,23 @@ class ExpressionFlowMixin:
                 if abs(left) > 10**15 or abs(right) > 10**15:
                     return NonTextValue("number")
                 return fn(left, right)
+        from .p_output_flow import StaticSet
+        if isinstance(left, StaticSet) and isinstance(right, StaticSet) and isinstance(
+                node.op, (ast.Sub, ast.BitOr, ast.BitAnd, ast.BitXor)):
+            a, b = {}, {}
+            for source, destination in ((left, a), (right, b)):
+                for item in source.values:
+                    raw = self.literal(item)
+                    if type(raw) not in {str, int, float, bool, type(None)}:
+                        return self.unknown("P_OUTPUT_DYNAMIC_SET", module, node)
+                    destination[raw] = item
+            keys = ({ast.Sub: lambda: a.keys()-b.keys(),
+                     ast.BitOr: lambda: a.keys()|b.keys(),
+                     ast.BitAnd: lambda: a.keys()&b.keys(),
+                     ast.BitXor: lambda: a.keys()^b.keys()}[type(node.op)])()
+            # Stable source order without comparing heterogeneous Python values.
+            order = list(dict.fromkeys([*a, *b]))
+            return StaticSet([a[k] if k in a else b[k] for k in order if k in keys])
         if isinstance(node.op, ast.Add):
             if isinstance(left, StaticText) and isinstance(right, StaticText):
                 return self.text_result(module, node, left.value + right.value, left, right)
@@ -203,12 +222,35 @@ class ExpressionFlowMixin:
             qualified=parsed[0].qualify(member)
         return qualified
 
+    def safe_builtin_factory(self,module,node):
+        if not isinstance(node,ast.Name) or node.id not in {"list","tuple","dict","set"}:
+            return False
+        if self.canonical_symbol(module,node.id)!=node.id or self.lookup(module,node.id):
+            return False
+        for statement in module.tree.body:
+            if isinstance(statement,(ast.Assign,ast.AnnAssign)):
+                targets=statement.targets if isinstance(statement,ast.Assign) else [statement.target]
+                if any(isinstance(t,ast.Name) and t.id==node.id for t in targets):
+                    return False
+            if isinstance(statement,(ast.If,ast.For,ast.While,ast.Try,ast.With)) and any(
+                    isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store) and n.id==node.id for n in ast.walk(statement)):
+                return False
+        return True
+
     def safe_annotation_metadata(self,module,node,active=None):
         active=set() if active is None else active
         for child in ast.walk(node):
             self.tick()
-            if isinstance(child,ast.Call) and self.canonical_symbol(module,dotted(child.func)) not in {"pydantic.Field","pydantic.fields.Field"}:
-                return False
+            if isinstance(child,ast.Call):
+                if self.canonical_symbol(module,dotted(child.func)) not in {"pydantic.Field","pydantic.fields.Field"}:
+                    return False
+                basic={"default","default_factory","description","title","ge","le","gt","lt",
+                       "min_length","max_length","pattern","strict","frozen","multiple_of","allow_inf_nan","alias"}
+                if any(k.arg not in basic for k in child.keywords):
+                    return False
+                for keyword in child.keywords:
+                    if keyword.arg=="default_factory" and not self.safe_builtin_factory(module,keyword.value):
+                        return False
             if isinstance(child,ast.Name):
                 symbol=self.canonical_symbol(module,child.id)
                 owner,_,member=symbol.rpartition(".")
@@ -226,6 +268,42 @@ class ExpressionFlowMixin:
                             if not self.safe_annotation_metadata(target,stmt.value,active|{key}):return False
         return True
 
+    def constrain_input_text(self,module,value,field):
+        if getattr(self,"input_kind","tool")!="tool":
+            return value
+        if not isinstance(field,ast.Call) or self.canonical_symbol(module,dotted(field.func)) not in {"pydantic.Field","pydantic.fields.Field"}:
+            return value
+        if not self.safe_annotation_metadata(module,field):
+            return value
+        if isinstance(value,SequenceDomain):
+            bounds={k.arg:k.value.value for k in field.keywords if k.arg in {"min_length","max_length"}
+                    and isinstance(k.value,ast.Constant) and type(k.value.value) is int and k.value.value>=0}
+            lower=max(value.min_length,bounds.get("min_length",0))
+            upper=bounds.get("max_length",value.max_length)
+            if value.max_length is not None and upper is not None:upper=min(value.max_length,upper)
+            return SequenceDomain(value.element,lower,upper)
+        if not isinstance(value,RuntimeInputText):
+            return value
+        pattern=next((k.value.value for k in field.keywords if k.arg=="pattern"
+                      and isinstance(k.value,ast.Constant) and isinstance(k.value.value,str)),None)
+        if ascii_token_pattern(pattern):
+            return ValidatedToken("P_OUTPUT_VALIDATED_TOKEN",value.span,pattern)
+        return value
+
+    def comparable_domain(self,value):
+        from .p_output_flow import PossibleValues
+        if isinstance(value,(StaticText,RuntimeInputText)):
+            return "str"
+        if self.numeric(value):
+            return "number"
+        if isinstance(value,(list,tuple)):
+            parts=tuple(self.comparable_domain(v) for v in value)
+            return ("tuple",parts) if all(v is not None for v in parts) else None
+        if isinstance(value,PossibleValues) and value.uncertainty is None:
+            parts=[self.comparable_domain(v) for v in value.values]
+            return parts[0] if parts and parts[0] is not None and all(p==parts[0] for p in parts) else None
+        return None
+
     def input_value(self,module,node,active=None):
         from .p_output_flow import PossibleValues
         active=set() if active is None else active
@@ -242,10 +320,21 @@ class ExpressionFlowMixin:
             if origin in {"typing.Annotated","typing_extensions.Annotated"}:
                 if not self.safe_annotation_metadata(module,node):
                     return self.unknown("P_OUTPUT_UNVERIFIED_INPUT_METADATA",module,node)
-                return self.input_value(module,args[0],active)
+                value=self.input_value(module,args[0],active)
+                for metadata in args[1:]:
+                    value=self.constrain_input_text(module,value,metadata)
+                return value
             if origin in {"typing.Literal","typing_extensions.Literal"} and all(isinstance(a,ast.Constant) for a in args):
                 return PossibleValues(tuple(self.value(module,a,{}) for a in args),None)
-            if origin in {"list","tuple","set","typing.List","typing.Sequence"}:
+            if origin in {"list","tuple","set","typing.List","typing.Sequence","typing.Tuple"}:
+                if origin in {"list","tuple","set"} and not self.safe_builtin_factory(module,node.value):
+                    return self.unknown("P_OUTPUT_UNVERIFIED_INPUT_CONTRACT",module,node)
+                if origin in {"tuple","typing.Tuple"} and not (len(args)==2 and isinstance(args[1],ast.Constant) and args[1].value is Ellipsis):
+                    if len(args)>self.MAX_ALTERNATIVES:
+                        return self.unknown("P_OUTPUT_TUPLE_DOMAIN_LIMIT",module,node)
+                    elements=tuple(self.input_value(module,arg,active) for arg in args)
+                    element=elements[0] if len(elements)==1 else PossibleValues(elements,None)
+                    return SequenceDomain(element,len(args),len(args))
                 return SequenceDomain(self.input_value(module,args[0],active))
         symbol=module.qualify(dotted(node))
         rebound=False
@@ -285,8 +374,25 @@ class ExpressionFlowMixin:
         from .p_output_flow import StaticInstance
         if not self.simple_model(module,cls) or (module.path,cls.name) in active:
             return self.unknown("P_OUTPUT_UNMODELED_INPUT",module,cls)
-        fields={n.target.id:self.input_value(module,n.annotation,active|{(module.path,cls.name)})
-                for n in cls.body if isinstance(n,ast.AnnAssign) and isinstance(n.target,ast.Name)}
+        from .p_output_flow import PossibleValues
+        fields={}
+        for node in cls.body:
+            if not isinstance(node,ast.AnnAssign) or not isinstance(node.target,ast.Name):
+                continue
+            value=self.input_value(module,node.annotation,active|{(module.path,cls.name)})
+            default=node.value
+            has_default=default is not None and not (isinstance(default,ast.Constant) and default.value is Ellipsis)
+            if isinstance(default,ast.Call):
+                value=self.constrain_input_text(module,value,default)
+                raw=default.args[0] if default.args else next((k.value for k in default.keywords if k.arg=="default"),None)
+                has_default=(raw is not None and not (isinstance(raw,ast.Constant) and raw.value is Ellipsis)
+                             or any(k.arg=="default_factory" for k in default.keywords))
+                fallback=self.field_default(module,default) if has_default else None
+            elif has_default:
+                fallback=self.value(module,default,self.module_environment(module.path))
+            else:
+                fallback=None
+            fields[node.target.id]=PossibleValues((value,fallback),None) if has_default else value
         return StaticInstance(module.path,cls.name,fields)
 
     def simple_model(self,module,cls):
@@ -296,13 +402,15 @@ class ExpressionFlowMixin:
         for statement in cls.body:
             if isinstance(statement,ast.AnnAssign):
                 if not self.safe_annotation_metadata(module,statement.annotation):return False
+                if isinstance(statement.value,ast.Call) and not self.safe_annotation_metadata(module,statement.value):return False
                 continue
             if isinstance(statement,ast.Pass):continue
             if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Constant) and isinstance(statement.value.value,str):continue
             if isinstance(statement,ast.Assign) and len(statement.targets)==1 and isinstance(statement.targets[0],ast.Name) and statement.targets[0].id=="model_config":
                 call=statement.value
                 if isinstance(call,ast.Call) and module.qualify(dotted(call.func))=="pydantic.ConfigDict" and not call.args and all(
-                        k.arg in {"extra","frozen"} and isinstance(k.value,ast.Constant) for k in call.keywords):continue
+                        k.arg in {"extra","frozen","strict"} and isinstance(k.value,ast.Constant)
+                        and (k.arg!="strict" or type(k.value.value) is bool) for k in call.keywords):continue
             return False
         return True
 
@@ -330,10 +438,12 @@ class ExpressionFlowMixin:
         if module.qualify(dotted(node.func)) not in {"pydantic.Field","pydantic.fields.Field"}:
             return self.unknown("P_OUTPUT_UNMODELED_DEFAULT",module,node)
         keywords={k.arg:k.value for k in node.keywords}
+        if len(node.args)==1 and "default" not in keywords:
+            return self.value(module,node.args[0],self.module_environment(module.path))
         if "default" in keywords:
             return self.value(module,keywords["default"],self.module_environment(module.path))
         factory=keywords.get("default_factory")
-        if isinstance(factory,ast.Name) and factory.id in {"list","tuple","dict","set"}:
+        if self.safe_builtin_factory(module,factory):
             from .p_output_flow import StaticMapping,StaticSet
             return {"list":list,"tuple":list,"dict":lambda:StaticMapping({}),"set":StaticSet}[factory.id]()
         return self.unknown("P_OUTPUT_UNMODELED_DEFAULT",module,node)
@@ -351,6 +461,8 @@ class ExpressionFlowMixin:
                 if candidate.kind in {"int","float","bool"}:
                     return candidate.kind==kind.name or candidate.kind=="bool" and kind.name=="int"
                 return NonTextValue("bool")
+            if isinstance(candidate,SequenceDomain):
+                return NonTextValue("bool") if kind.name in {"list","tuple","set"} else False
             if isinstance(candidate,RuntimeInputText):return kind.name=="str"
             types={"str":StaticText,"list":list,"tuple":tuple,"dict":StaticMapping,"set":StaticSet}
             if kind.name in types:return isinstance(candidate,types[kind.name])
@@ -368,7 +480,15 @@ class ExpressionFlowMixin:
             return NonTextValue("bool") if truth is None else truth
         if name=="str" and len(args)==1:
             a=args[0]
-            if isinstance(a,StaticText):return a
+            if isinstance(a,CaughtException):
+                message=a.message
+                if isinstance(message,StaticText):
+                    text=repr(message.value) if a.exception.removeprefix("builtins.")=="KeyError" else message.value
+                    return self.text_result(module,node,text,message)
+                if message is None or type(message) in {int,float,bool}:
+                    return self.text_result(module,node,str(message) if message is not None else "")
+                return self.unknown("P_OUTPUT_EXCEPTION_TEXT",module,node)
+            if isinstance(a,(StaticText,RuntimeInputText)):return a
             if a is None or type(a) in {int,float,bool}:return self.text_result(module,node,str(a))
             return unknown()
         if name=="len" and len(args)==1:
@@ -395,14 +515,23 @@ class ExpressionFlowMixin:
             if items is None:return unknown()
             return StaticSet(items) if name=="set" else list(items)
         if name=="enumerate" and args:
-            if isinstance(args[0],SequenceDomain):return SequenceDomain([NonTextValue("int"),args[0].element])
+            if isinstance(args[0],SequenceDomain):return SequenceDomain([NonTextValue("int"),args[0].element],args[0].min_length,args[0].max_length)
             items=self.sequence_items(args[0]);start=args[1] if len(args)>1 else kw.get("start",0)
             if items is not None and type(start) is int:return [[i,v] for i,v in enumerate(items,start)]
             return unknown()
         if name=="zip":
+            if kw:return unknown()
             if any(isinstance(v,SequenceDomain) for v in args):
-                if all(isinstance(v,SequenceDomain) for v in args):return SequenceDomain([v.element for v in args])
-                return unknown()
+                elements=[]
+                for value in args:
+                    if isinstance(value,SequenceDomain):
+                        elements.append(value.element)
+                    else:
+                        items=self.sequence_items(value)
+                        if items is None:return unknown()
+                        if not items:return []
+                        elements.append(items[0] if len(items)==1 else PossibleValues(tuple(items),None))
+                return SequenceDomain(elements)
             lists=[self.sequence_items(v) for v in args]
             if all(v is not None for v in lists):return [list(v) for v in zip(*lists)]
             return unknown()
@@ -417,43 +546,74 @@ class ExpressionFlowMixin:
                 entries[key]=(original,count+1)
             return StaticMapping(entries)
         if name in {"sum","any","all","min","max","sorted"} and args:
+            allowed={"sum":{"start"},"any":set(),"all":set(),"min":{"key","default"},"max":{"key","default"},"sorted":{"key","reverse"}}[name]
+            if set(kw)-allowed:return unknown()
+            if name in {"any","all","sorted"} and len(args)!=1:return unknown()
+            if name=="sum" and (len(args)>2 or len(args)>1 and "start" in kw):return unknown()
+            if name in {"min","max"} and len(args)>1 and "default" in kw:return unknown()
+            key=kw.get("key")
+            reverse=kw.get("reverse",False)
+            if name=="sorted" and not (type(reverse) in {bool,int} or isinstance(reverse,NonTextValue) and reverse.kind in {"bool","int"}):
+                return self.unknown("P_OUTPUT_SORT_ARGUMENT",module,node)
             items=self.sequence_items(args[0]) if len(args)==1 or name in {"sum","sorted","any","all"} else list(args)
+            def pure_key(value):
+                if key is None:return value
+                pure={"int","float","bool","str","len","round","abs","min","max","sum"}
+                if not isinstance(key,(StaticLambda,BuiltinFunction)) or (
+                        isinstance(key,StaticLambda) and any(
+                            not isinstance(call.func,ast.Name) or call.func.id not in pure
+                            or self.lookup(module,module.qualify(call.func.id))
+                            for call in ast.walk(key.node.body) if isinstance(call,ast.Call))):
+                    return self.unknown("P_OUTPUT_SORT_KEY_EFFECT",module,node)
+                return self.apply_lambda(module,node,key,[value])
             if items is None:
-                if isinstance(args[0],SequenceDomain) and self.numeric(args[0].element):
-                    if name=="sorted" and "key" in kw:
-                        function=kw["key"]
-                        pure={"int","float","bool","str","len","round","abs","min","max","sum"}
-                        if not isinstance(function,StaticLambda) or any(
-                            not isinstance(call.func,ast.Name) or call.func.id not in pure or self.lookup(module,module.qualify(call.func.id))
-                            for call in ast.walk(function.node.body) if isinstance(call,ast.Call)):
-                            return self.unknown("P_OUTPUT_SORT_KEY_EFFECT",module,node)
-                    return NonTextValue("bool" if name in {"any","all"} else "number") if name!="sorted" else args[0]
+                if not isinstance(args[0],SequenceDomain):return unknown()
+                element=args[0].element
+                if name in {"sorted","min","max"}:
+                    comparison=pure_key(element)
+                    if self.comparable_domain(comparison) is None:
+                        return comparison if isinstance(comparison,UnresolvedValue) else self.unknown("P_OUTPUT_SORT_KEY_UNRESOLVED",module,node)
+                    if name=="sorted":return args[0]
+                    return PossibleValues((element,kw["default"]),None) if "default" in kw and args[0].min_length==0 else element
+                if name=="sum":
+                    initial=args[1] if len(args)>1 else kw.get("start",0)
+                    return NonTextValue("number") if self.numeric(element) and self.numeric(initial) else unknown()
+                if name in {"any","all"} and (self.numeric(element) or isinstance(element,(StaticText,RuntimeInputText,StaticMapping,list,StaticInstance)) or element is None):
+                    return NonTextValue("bool")
                 return unknown()
             if name in {"any","all"}:
+                if any(isinstance(v,UnresolvedValue) and not isinstance(v,RuntimeInputText) for v in items):return unknown()
                 truths=[self.truth(v) for v in items]
                 if name=="any" and True in truths:return True
                 if name=="all" and False in truths:return False
                 return NonTextValue("bool") if None in truths else (any(truths) if name=="any" else all(truths))
             if name=="sum":
-                if all(self.numeric(v) for v in items):
-                    return NonTextValue("number") if any(type(v) not in {int,float,bool} for v in items) else sum(items,args[1] if len(args)>1 else 0)
-                return unknown()
-            if any(isinstance(v,NonTextValue) for v in items):
-                if all(self.numeric(v) for v in items):
-                    return SequenceDomain(NonTextValue("number")) if name=="sorted" else NonTextValue("number")
-                return unknown()
-            keys=[self.apply_lambda(module,node,kw["key"],[v]) if "key" in kw else v for v in items]
+                initial=args[1] if len(args)>1 else kw.get("start",0)
+                if not all(self.numeric(v) for v in [*items,initial]):return unknown()
+                return sum(items,initial) if all(type(v) in {int,float,bool} for v in [*items,initial]) else NonTextValue("number")
+            if not items:
+                return [] if name=="sorted" else kw.get("default",unknown())
+            if key is None and all(self.numeric(v) for v in items) and any(type(v) not in {int,float,bool} for v in items):
+                return [NonTextValue("number") for _ in items] if name=="sorted" else NonTextValue("number")
+            keys=[pure_key(v) for v in items]
+            if any(self.comparable_domain(v) is None for v in keys):
+                return self.unknown("P_OUTPUT_SORT_KEY_UNRESOLVED",module,node)
             raw=[self.literal(v) for v in keys]
-            if not all(v is None or type(v) in {int,float,bool,str} for v in raw):return unknown()
+            if not all(type(v) in {int,float,bool,str} for v in raw):
+                choice=PossibleValues(tuple(items),None)
+                return [choice for _ in items] if name=="sorted" else choice
             if name=="sorted":
-                return [v for _,v in sorted(zip(raw,items),key=lambda pair:pair[0],reverse=bool(kw.get("reverse",False)))]
-            if not items:return kw.get("default",unknown())
+                def ordered(flag):
+                    return [v for _,v in sorted(zip(raw,items),key=lambda pair:pair[0],reverse=flag)]
+                if isinstance(reverse,NonTextValue):
+                    return PossibleValues((ordered(False),ordered(True)),None)
+                return ordered(bool(reverse))
             index=(min if name=="min" else max)(range(len(items)),key=lambda i:raw[i])
             return items[index]
         return unknown()
 
     def method(self,module,node,receiver,name,args,kw):
-        from .p_output_flow import StaticMapping,StaticInstance,PossibleValues
+        from .p_output_flow import StaticMapping,StaticInstance,StaticSet,PossibleValues
         snapshot=self.snapshot_call(module,node,"",args,kw,receiver,name)
         if snapshot is not NotImplemented:return snapshot
         if isinstance(receiver,BuiltinType) and receiver.name=="dict" and name=="fromkeys" and 1<=len(args)<=2 and not kw:
@@ -466,7 +626,15 @@ class ExpressionFlowMixin:
                 entries[raw]=(key,args[1] if len(args)>1 else None)
             return StaticMapping(entries)
         if isinstance(receiver,RuntimeInputText):
-            if name in {"strip","lstrip","rstrip","lower","upper","casefold"} and not kw and len(args)<=1:
+            if name in {"lower","upper","casefold"} and not kw and not args:
+                return receiver
+            if name in {"strip","lstrip","rstrip"} and not kw and len(args)<=1 and all(
+                    isinstance(a,StaticText) or a is None for a in args):
+                return receiver
+            if name=="replace" and not kw and 2<=len(args)<=3 and all(
+                    isinstance(a,StaticText) for a in args[:2]) and (len(args)==2 or type(args[2]) is int):
+                if isinstance(receiver,ValidatedToken) and any(not 33<=ord(c)<=126 for c in args[1].value):
+                    return RuntimeInputText("P_OUTPUT_RUNTIME_PARAMETER",location(module.path,node))
                 return receiver
             if name=="split" and not kw and len(args)<=2:
                 return SequenceDomain(receiver)
@@ -499,8 +667,10 @@ class ExpressionFlowMixin:
                 receiver.entries.update({k:(StaticText(k,location(module.path,node)),v) for k,v in kw.items()})
                 return None
             if name in {"items","keys","values"} and not args and not kw:
+                if name=="keys":
+                    return StaticSet([k for k,_ in receiver.entries.values()])
                 return [[k,v] for k,v in receiver.entries.values()] if name=="items" else [
-                    k if name=="keys" else v for k,v in receiver.entries.values()]
+                    v for _,v in receiver.entries.values()]
             if name=="get" and args:
                 raw=self.literal(args[0]);default=args[1] if len(args)>1 else None
                 if type(raw) in {str,int,float,bool,type(None)}:return receiver.entries.get(raw,(None,default))[1]
@@ -516,6 +686,13 @@ class ExpressionFlowMixin:
                 return StaticMapping({k:(StaticText(k,location(module.path,node)),v) for k,v in receiver.fields.items()})
             return NotImplemented
         if isinstance(receiver,StaticText):
+            if name in {"strip","lstrip","rstrip"} and not kw and len(args)<=1 and all(
+                    isinstance(a,StaticText) or a is None for a in args):
+                text = {"strip":str.strip,"lstrip":str.lstrip,"rstrip":str.rstrip}[name](
+                    receiver.value, *[self.literal(a) for a in args])
+                from .models import TraceStep
+                return replace(receiver, value=text, trace=receiver.trace + (
+                    TraceStep("call", location(module.path,node), symbol="static string normalization"),))
             if name in {"isdigit","isdecimal","isalnum"} and not args and not kw:
                 return {"isdigit":str.isdigit,"isdecimal":str.isdecimal,"isalnum":str.isalnum}[name](receiver.value)
             raw=[self.literal(v) for v in args]
@@ -546,7 +723,45 @@ class ExpressionFlowMixin:
             key=(id(node),id(env))
             if key in cache:return cache[key]
         result=self.expression_value(module,node,env)
-        if isinstance(node,ast.Call) and isinstance(result,UnresolvedValue) and result.code!="P_OUTPUT_RUNTIME_PARAMETER" and self.handler_envs is not None:
+        from .p_output_flow import PossibleValues
+        def separate(value):
+            if isinstance(value, RaisedValue):
+                return [], [value]
+            if isinstance(value, PossibleValues):
+                normal, raised = [], []
+                for member in value.values:
+                    n, r = separate(member)
+                    normal.extend(n)
+                    raised.extend(r)
+                if value.uncertainty is not None:
+                    normal.append(value.uncertainty)
+                return normal, raised
+            return [value], []
+        normal, raised = separate(result)
+        if raised:
+            if not self.raise_frames:
+                return self.unknown("P_OUTPUT_INITIALIZER_EXCEPTION", module, node)
+            # Record exception alternatives before the successful path can
+            # mutate the caller environment further.
+            for value in raised[1:] if not normal else raised:
+                origin = self.outcome("next", env)
+                local = self.fork_environment(env)
+                self.raise_frames[-1].append(self.outcome(
+                    "raise", local, value.message, value.span, value.exception))
+                self.activate(origin)
+            if not normal:
+                raise StaticRaised(raised[0])
+            result = normal[0] if len(normal)==1 else PossibleValues(tuple(normal),
+                result.uncertainty if isinstance(result, PossibleValues) else None)
+        def unbound(value):
+            if isinstance(value,UnresolvedValue) and value.code=="P_OUTPUT_POSSIBLY_UNBOUND":
+                self.pending_gaps.append(value)
+            elif isinstance(value,PossibleValues):
+                for part in value.values:
+                    unbound(part)
+        if isinstance(node,ast.Name):
+            unbound(result)
+        if isinstance(node,ast.Call) and isinstance(result,UnresolvedValue) and not isinstance(result,RuntimeInputText) and self.handler_envs is not None:
             self.pending_gaps.append(result)
         return result
 
@@ -554,6 +769,16 @@ class ExpressionFlowMixin:
         from .p_output_flow import StaticMapping,StaticInstance,PossibleValues
         self.tick()
         if node is None:return None
+        if isinstance(node,ast.Set):
+            from .p_output_flow import StaticSet
+            entries = {}
+            for element in node.elts:
+                value = self.value(module, element, env)
+                raw = self.literal(value)
+                if type(raw) not in {str, int, float, bool, type(None)}:
+                    return self.unknown("P_OUTPUT_DYNAMIC_SET", module, node)
+                entries[raw] = value
+            return StaticSet(list(entries.values()))
         if isinstance(node,ast.Lambda):
             return StaticLambda(module.path,node,env)
         if isinstance(node,(ast.ListComp,ast.SetComp,ast.DictComp,ast.GeneratorExp)):
@@ -659,11 +884,44 @@ class ExpressionFlowMixin:
         if isinstance(node,ast.Call) and not any(isinstance(a,ast.Starred) for a in node.args) and not any(k.arg is None for k in node.keywords):
             symbol=dotted(node.func);head=symbol.partition(".")[0]
             name=module.qualify(symbol) if head not in env else ""
+            if name in {"pydantic.Field","pydantic.fields.Field"} and not self.lookup(module,name) and not any(
+                    k=="pydantic" or k.startswith("pydantic.") for k in self.module_paths):
+                safe={"default","default_factory","description","title","ge","le","gt","lt",
+                      "min_length","max_length","pattern","strict","frozen","multiple_of","allow_inf_nan","alias"}
+                if len(node.args)<=1 and all(k.arg in safe for k in node.keywords):
+                    factory=next((k.value for k in node.keywords if k.arg=="default_factory"),None)
+                    if factory is not None and not self.safe_builtin_factory(module,factory):
+                        return self.unknown("P_OUTPUT_UNMODELED_DEFAULT_FACTORY",module,node)
+                    # Evaluate argument expressions abstractly; callbacks are not
+                    # invoked just because Field itself is metadata.
+                    for expression in [*node.args,*[k.value for k in node.keywords if k.arg!="default_factory"]]:
+                        value=self.value(module,expression,env)
+                        if isinstance(value,UnresolvedValue):
+                            return value
+                    return AnnotationValue()
+                return self.unknown("P_OUTPUT_UNMODELED_FIELD_METADATA",module,node)
+            message_roles={"mcp.server.fastmcp.prompts.base.UserMessage":"user",
+                           "mcp.server.fastmcp.prompts.base.AssistantMessage":"assistant"}
+            wrappers=set(message_roles)|{"mcp.types.PromptMessage","mcp.types.TextContent"}
+            if name in wrappers and not self.lookup(module,name) and not any(
+                    k=="mcp" or k.startswith("mcp.") for k in self.module_paths):
+                args=[self.value(module,a,env) for a in node.args]
+                kw={k.arg:self.value(module,k.value,env) for k in node.keywords}
+                def mapping(fields):
+                    return StaticMapping({k:(StaticText(k,location(module.path,node)),v) for k,v in fields.items()})
+                if name in message_roles and len(args)<=1 and not (args and "content" in kw) and not (set(kw)-{"content"}):
+                    content=args[0] if args else kw.get("content",self.unknown("P_PROMPT_DYNAMIC_CONTENT",module,node))
+                    return mapping({"role":StaticText(message_roles[name],location(module.path,node)),"content":content})
+                if name=="mcp.types.PromptMessage" and not args and set(kw)=={"role","content"}:
+                    return mapping(kw)
+                if name=="mcp.types.TextContent" and not args and set(kw)=={"type","text"} and self.literal(kw["type"])=="text":
+                    return mapping(kw)
+                return self.unknown("P_PROMPT_DYNAMIC_MESSAGE",module,node)
             builtins={"int","float","bool","str","len","round","abs","range","list","tuple","set","enumerate","zip","sum","min","max","any","all","sorted","collections.Counter","isinstance"}
             found=self.lookup(module,name) if name else None
             snapshot_name=name in {"json.loads","json.load"} and not found
             supported_method=isinstance(node.func,ast.Attribute) and node.func.attr in {
-                "items","keys","values","get","model_dump","model_validate","lower","upper","casefold","startswith","endswith","replace","split","join",
+                "items","keys","values","get","model_dump","model_validate","lower","upper","casefold","strip","lstrip","rstrip","startswith","endswith","replace","split","join",
                 "append","extend","pop","count","clear","reverse","update",
                 "open","read","read_text","read_bytes","decode","exists","is_file","is_symlink","fromkeys","isdigit","isdecimal","isalnum"}
             if name in builtins and not found or found and isinstance(found[1],ast.ClassDef) and self.simple_model(*found) or name=="getattr" or supported_method or snapshot_name:

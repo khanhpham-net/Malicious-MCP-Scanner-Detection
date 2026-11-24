@@ -179,3 +179,12 @@ complete coverage within this bounded profile is not a benign verdict.
 
 Regression checks are in tests/test_p_coverage.py and tests/test_p_output_flow.py,
 alongside the other tests/test_p_*.py extraction and integration checks.
+
+
+## P development, JS/TS metadata and passive comparison
+
+The optional `.[js]` extra adds bounded JS/TS MCP metadata extraction to the
+English P pipeline. `snapshot-p` and `diff-p-snapshots` provide hash-only static
+metadata artifacts with explicit scope and reviewed baselines. See the
+[P development and handoff guide](docs/p-detector-development.md) for supported
+profiles, limits, audit commands and the pending independent evaluation.

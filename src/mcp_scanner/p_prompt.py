@@ -265,12 +265,6 @@ def extract_python_prompt_metadata(inventory, discovered_servers, *, deadline=No
 
 
 def extract_python_prompt_messages(inventory, discovered_servers, *, deadline=None):
-    """Read literal strings and supported text message constructors/lists.
-
-    Supports statically resolved local aliases, SDK UserMessage/AssistantMessage,
-    PromptMessage with TextContent, and equivalent literal text dictionaries.
-    Dynamic interpolation, branches, helper/file reads and non-text content are
-    marked partial. Declared templates are observed; target code is never run.
-    """
-    return _PromptExtractor(inventory, deadline).run(discovered_servers, metadata=False)
-
+    """Follow bounded prompt return flow, helpers and supported MCP messages."""
+    from .p_prompt_flow import extract_prompt_outputs
+    return extract_prompt_outputs(inventory,discovered_servers,deadline=deadline)

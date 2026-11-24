@@ -8,12 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 import time
+import unicodedata
 
 from .models import Finding, RedactedEvidence, make_root_cause_group_id, stable_sha256_id
 from .p_surface import SurfaceText
 
 
-RULE_VERSION = "0.2"
+RULE_VERSION = "0.3"
 MAX_TEXT_CHARS = 65536
 _PREFIX = r"(?:assistant\s*[:,]\s*|you\s+(?:must|should)\s+)?"
 _RULES = (
@@ -38,6 +39,12 @@ _RULES = (
         r"(?:record\s+identifiers?|records?|rows?|data|identifiers?|documents?|files?)\b"
         r"[^.!?\n]{0,180}\b(?:reply|answer|response|output|public|customer)\b", re.I),
      "Tool description directs internal data into an outward response"),
+    ("session-context-disclosure", re.compile(
+        r"\b(?:also|additionally|in\s+addition)\s+(?:retrieve|collect|obtain|include|attach|append|send|reveal)\b"
+        r"[^.!?;]{0,450}\b(?:current\s+(?:working\s+)?directory(?:\s+path)?|"
+        r"(?:configuration|environment)\s+variable\s+names|names\s+of\s+(?:the\s+)?(?:configuration|environment)\s+variables)\b"
+        r"[^.!?;]{0,250}\b(?:response|reply|answer)\b", re.I),
+     "Tool description requests adding session filesystem or configuration context to the response"),
     ("persistent-redirection", re.compile(
         r"\b(?:attach|append|include|insert|use|apply|follow)\b[^.!?\n]{0,200}"
         r"\b(?:every\s+(?:subsequent|future)\s+(?:answer|response|reply)|all\s+future\s+(?:answers|responses|replies))\b"
@@ -54,7 +61,8 @@ _NEGATION = re.compile(r"\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s*$"
 _REPORTING = re.compile(
     r"^\s*(?:a\s+|an\s+|the\s+)?(?:example|tutorial|glossary|training\s+exercise|"
     r"security\s+guide)\s+(?:quotes?|discusses?|describes?|explains?|"
-    r"warns\s+against)\b", re.I)
+    r"warns\s+against)\b(?:\s+(?:the\s+)?(?:phrase|instruction|directive|pattern|sentence|example))?"
+    r"\s*[:\-]?\s*[\"'>]*\s*$", re.I)
 
 
 @dataclass
@@ -62,6 +70,14 @@ class PDetectionResult:
     findings: list[Finding] = field(default_factory=list)
     diagnostics: list[dict[str, object]] = field(default_factory=list)
     status: str = "complete"
+
+
+def normalize_p_text(text):
+    """Bounded textual normalization; evidence still locates original source."""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.translate({ord(c):None for c in "\u200b\u2060\ufeff"})
+    normalized = re.sub(r"\s+", " ", normalized)
+    return re.sub(r"(?:\*\*|__|`)", "", normalized)
 
 
 def detect_surface_instructions(
@@ -92,9 +108,10 @@ def detect_surface_instructions(
             if reason == "P_DETECTION_DEADLINE":
                 break
             continue
+        normalized = normalize_p_text(item.text)
         for suffix, pattern, title in _RULES:
             matches = []
-            for sentence in re.finditer(r"[^.!?;\n]+[.!?;]?", item.text):
+            for sentence in re.finditer(r"[^.!?;]+[.!?;]?", normalized):
                 for match in pattern.finditer(sentence.group()):
                     prefix = sentence.group()[:match.start()]
                     if _NEGATION.search(prefix) or _REPORTING.match(prefix):

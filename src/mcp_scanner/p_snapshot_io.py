@@ -54,6 +54,7 @@ class SnapshotIoMixin:
         if isinstance(receiver,StaticPath):
             if method in {"exists","is_file","is_symlink"} and not args and not kw:
                 from .p_domains import NonTextValue
+                if getattr(self,"snapshot_dirty",False):return NonTextValue("bool")
                 raw=receiver.value.replace("\\","/")
                 candidate=PurePosixPath(raw)
                 if candidate.is_absolute() or PureWindowsPath(raw).drive or ".." in candidate.parts:
@@ -86,6 +87,7 @@ class SnapshotIoMixin:
         return NotImplemented
 
     def binary_read(self,module,node,path):
+        if getattr(self,"snapshot_dirty",False):return self.unknown("P_OUTPUT_FILE_AFTER_EFFECT",module,node)
         if not isinstance(path,StaticPath):return self.unknown("P_OUTPUT_DYNAMIC_PATH",module,node)
         raw=path.value.replace("\\","/")
         candidate=PurePosixPath(raw)

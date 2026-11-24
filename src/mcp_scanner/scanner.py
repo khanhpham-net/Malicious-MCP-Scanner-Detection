@@ -38,7 +38,9 @@ from .p_surface import extract_python_tool_descriptions
 from .p_schema import extract_python_input_schema_descriptions
 from .p_resource import extract_python_resource_metadata, extract_python_resource_bodies
 from .p_prompt import extract_python_prompt_metadata, extract_python_prompt_messages
+from .p_js import extract_js_surfaces
 from .p_tool_result import extract_python_tool_results
+from .p_relations import analyze_instruction_relations, RELATION_VERSION
 from .package_json_analyzer import PackageJsonAnalysisResult, analyze_package_json_files
 from .sca_adapter import ScaAnalysisResult, analyze_sca_offline
 from .semgrep_adapter import (
@@ -723,6 +725,8 @@ def run_scan(
     # Analyze supported English Python metadata through shared P rules.
     t0 = time.monotonic()
     p_result = PDetectionResult()
+    p_texts = []
+    relation_status = "skipped"
     p_status = "skipped"
     p_surfaces = {
         "tool_description": "skipped",
@@ -754,6 +758,7 @@ def run_scan(
             for surface, extract in extractors:
                 try:
                     extracted = extract(inventory, py_data["discovered_servers"], deadline=deadline)
+                    p_texts.extend(extracted.texts)
                     detected = detect_surface_instructions(extracted.texts, deadline=deadline)
                     p_result.findings.extend(detected.findings)
                     p_result.diagnostics.extend(extracted.diagnostics)
@@ -773,8 +778,67 @@ def run_scan(
         p_status = p_result.status
     elif enable_p_detector:
         p_surfaces = {key: "unmeasured" for key in p_surfaces}
+    if enable_p_detector and inventory.js_ts_files():
+        try:
+            js_result = extract_js_surfaces(inventory, server_id=resolved_server_id, deadline=deadline)
+            p_texts.extend(js_result.texts)
+            detected = detect_surface_instructions(js_result.texts, deadline=deadline)
+            p_result.findings.extend(detected.findings)
+            p_result.diagnostics.extend(js_result.diagnostics)
+            p_result.diagnostics.extend(detected.diagnostics)
+            if "partial" in {js_result.status, detected.status}:
+                p_result.status = "partial"
+            for surface, js_state in js_result.surfaces.items():
+                previous = p_surfaces[surface]
+                if "partial" in {previous, js_state} or previous == "failed":
+                    p_surfaces[surface] = "partial"
+                elif js_state == "unmeasured" and js_result.status == "partial":
+                    p_surfaces[surface] = "partial"
+                elif "scanned" in {previous, js_state}:
+                    p_surfaces[surface] = "scanned"
+                elif "none_found" in {previous, js_state}:
+                    p_surfaces[surface] = "none_found"
+                else:
+                    p_surfaces[surface] = js_state
+            p_status = p_result.status
+        except Exception as error:
+            p_result.status = p_status = "partial"
+            p_surfaces = {key: "failed" for key in p_surfaces}
+            p_result.diagnostics.append({"code": "P_JS_ANALYSIS_ERROR",
+                "message": f"{type(error).__name__}: JS/TS P extraction failed."})
+    # Offline composition consumes only approved text and existing core facts.
+    # This is a separate bounded analysis scope; it never executes target code.
+    if enable_p_detector:
+        try:
+            relations = analyze_instruction_relations(inventory, py_data["discovered_servers"],
+                p_texts, [*py_data["findings"], *p_result.findings], deadline=deadline)
+            relation_status = relations.status
+            if p_status == "partial":
+                relation_status = "partial"
+            if inventory.js_ts_files():
+                relation_status = "partial"
+                relations.diagnostics.append({"code": "P_RELATION_JS_UNSUPPORTED",
+                    "scope": "Python handler consequence specialization only"})
+            if any(component.get("proved_no_instruction_fields")
+                   for diagnostic in p_result.diagnostics
+                   if diagnostic.get("code") == "P_OUTPUT_COVERAGE_SUMMARY"
+                   for component in diagnostic.get("components", [])):
+                relation_status = "partial"
+                relations.diagnostics.append({"code": "P_RELATION_TOKEN_SCOPE",
+                    "scope": "Existing token certificates cover regex rules only, not relation analysis."})
+            by_id = {finding.finding_id: finding for finding in p_result.findings}
+            by_id.update({finding.finding_id: finding for finding in relations.findings})
+            p_result.findings = list(by_id.values())
+            p_result.diagnostics.extend(relations.diagnostics)
+            if relation_status != "complete":
+                p_result.status = p_status = "partial"
+        except Exception as error:
+            relation_status = "failed"
+            p_result.status = p_status = "partial"
+            p_result.diagnostics.append({"code": "P_RELATION_ANALYSIS_ERROR",
+                "message": f"{type(error).__name__}: Offline relation analysis failed."})
     diagnostics.extend(p_result.diagnostics)
-    if any(d.get("code") in {"P_SCHEMA_EXTRACTION_BUDGET", "P_EXTRACTION_DEADLINE", "P_DETECTION_DEADLINE", "P_RESOURCE_EXTRACTION_BUDGET", "P_PROMPT_EXTRACTION_BUDGET", "P_OUTPUT_EXTRACTION_BUDGET"}
+    if any(d.get("code") in {"P_SCHEMA_EXTRACTION_BUDGET", "P_EXTRACTION_DEADLINE", "P_DETECTION_DEADLINE", "P_RESOURCE_EXTRACTION_BUDGET", "P_PROMPT_EXTRACTION_BUDGET", "P_OUTPUT_EXTRACTION_BUDGET", "P_JS_EXTRACTION_BUDGET"}
            for d in p_result.diagnostics):
         analysis_boundaries.append(AnalysisBoundary(
             kind="budget_exceeded", location=None,
@@ -1010,11 +1074,14 @@ def run_scan(
             "status": "skipped" if sca_result.status == "unmeasured" else sca_result.status,
         },
         {"name": "python_ast", "version": __version__, "status": py_engine_status},
+        {"name": "p_offline_relations", "version": RELATION_VERSION,
+         "status": relation_status, "language": "en", "mode": "offline",
+         "scope": "bounded-invocation-grammar-python-specialized-consequences"},
         *[
             {"name": f"p_{surface}", "version": "0.1",
              "status": {"scanned": "complete", "none_found": "complete",
                         "unmeasured": "skipped"}.get(status, status),
-             "language": "en", "scope": f"python-{surface}-heuristics"}
+             "language": "en", "scope": f"{'python-js-ts' if inventory.js_ts_files() else 'python'}-{surface}-heuristics"}
             for surface, status in p_surfaces.items()
         ],
         {

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from dataclasses import replace
 from .models import SourceSpan, TraceStep
 from .p_surface import SurfaceText
 from .p_domains import NonTextValue, SequenceDomain
+from .p_text_constraints import ValidatedToken, token_proof_available
 from .python_ast.index import location
 from .p_static import (
     StaticText as _Text, StaticPath as _Path,
@@ -19,6 +21,11 @@ from .p_output_flow import OutputValueResolver, StaticMapping, PossibleValues, S
 class _OutputExtractor(OutputValueResolver):
     def emit(self, value, context, returned, field_path="result", possible=False):
         self.tick()
+        if isinstance(value, ValidatedToken) and token_proof_available():
+            self.proved_no_instruction.append({"field_path":field_path,"domain":"validated-ascii-single-token",
+                "pattern_sha256":hashlib.sha256(value.pattern.encode()).hexdigest(),
+                "scope":"standalone field cannot match the reviewed multiword P rules"})
+            return
         if isinstance(value, NonTextValue):
             self.proved_non_text.append({"field_path":field_path,"domain":value.kind})
             return
@@ -83,16 +90,36 @@ class _OutputExtractor(OutputValueResolver):
                         continue
                     module = parsed[0]
                     self.begin_handler()
+                    self.input_kind=kind
                     if any(name=="mcp" or name.startswith("mcp.") or name=="fastmcp" or name.startswith("fastmcp.") for name in self.module_paths):
                         self.pending_gaps.append(_Unknown("P_OUTPUT_UNVERIFIED_INPUT_CONTRACT",span))
                     env = dict(self.module_environment(module.path))
                     parameters = [*handler.args.posonlyargs, *handler.args.args, *handler.args.kwonlyargs]
                     parameters.extend(arg for arg in (handler.args.vararg, handler.args.kwarg) if arg is not None)
+                    positional=[*handler.args.posonlyargs,*handler.args.args]
+                    defaults=dict(zip([p.arg for p in positional[len(positional)-len(handler.args.defaults):]],
+                                      handler.args.defaults))
+                    defaults.update({p.arg:v for p,v in zip(handler.args.kwonlyargs,handler.args.kw_defaults) if v is not None})
                     for arg in parameters:
-                        env[arg.arg]=self.input_value(module,arg.annotation or arg)
+                        value=self.input_value(module,arg.annotation or arg)
+                        if arg.arg in defaults:
+                            default=defaults[arg.arg]
+                            if isinstance(default,ast.Call) and self.canonical_symbol(module,ast.unparse(default.func)) in {"pydantic.Field","pydantic.fields.Field"}:
+                                value=self.constrain_input_text(module,value,default)
+                                raw=default.args[0] if default.args else next((k.value for k in default.keywords if k.arg=="default"),None)
+                                has_default=(raw is not None and not (isinstance(raw,ast.Constant) and raw.value is Ellipsis)
+                                             or any(k.arg=="default_factory" for k in default.keywords))
+                                if has_default:
+                                    fallback=self.field_default(module,default)
+                                    value=PossibleValues((value,fallback),None)
+                            else:
+                                fallback=self.value(module,default,self.module_environment(module.path))
+                                value=PossibleValues((value,fallback),None)
+                        env[arg.arg]=value
                     first_text=len(self.result.texts)
                     first_issue=len(self.result.diagnostics)
                     self.proved_non_text=[]
+                    self.proved_no_instruction=[]
                     value, returned = self.body(module,handler.body,env)
                     context={"server_id":server["server_id"],"surface_kind":surface_kind,"component":f"{kind}:{reg['name']}",
                              "declaration":SourceSpan.from_dict(reg["declaration_span"])}
@@ -113,6 +140,7 @@ class _OutputExtractor(OutputValueResolver):
                         "status":"partial" if unique_issues else "complete",
                         "observed_text_fragments":len(fragments),
                         "proved_non_text_fields":list({(v["field_path"],v["domain"]):v for v in self.proved_non_text}.values()),
+                        "proved_no_instruction_fields":list({(v["field_path"],v["pattern_sha256"]):v for v in self.proved_no_instruction}.values()),
                         "observed_field_paths":list(dict.fromkeys(t.field_path for t in fragments)),
                         "unresolved_fields":[{"field_path":i.get("field_path"),"code":i.get("code"),"location":i.get("location")} for i in unique_issues]
                     })

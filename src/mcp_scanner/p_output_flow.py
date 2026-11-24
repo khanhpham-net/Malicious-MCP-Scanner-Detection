@@ -8,6 +8,8 @@ from copy import deepcopy
 from .models import SourceSpan, TraceStep
 from .p_static import StaticValueResolver, StaticText, StaticPath, UnresolvedValue
 from .python_ast.index import dotted, location
+from .p_domains import RaisedValue
+from .p_flow_summary import FlowSummaryMixin
 from .p_control_flow import ControlFlowMixin
 from .p_expression_flow import ExpressionFlowMixin
 from .p_snapshot_io import SnapshotIoMixin
@@ -37,7 +39,7 @@ class StaticInstance:
     fields: dict = field(default_factory=dict)
 
 
-class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin, StaticValueResolver):
+class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, FlowSummaryMixin, SnapshotIoMixin, StaticValueResolver):
     """Interpret a deliberately small subset of first-party return flows.
 
     Unknown runtime branches preserve possible text with partial coverage.
@@ -55,12 +57,16 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin
         self.copy_memo = {}
         self.pending_gaps = []
         self.pending_error_texts = []
+        self.raise_frames = []
+        self.snapshot_dirty = False
 
     def begin_handler(self):
         self.handler_envs = {}
         self.copy_memo = {}
         self.pending_gaps = []
         self.pending_error_texts = []
+        self.raise_frames = []
+        self.snapshot_dirty = False
 
     def module_environment(self, path):
         parsed = self.parse(SourceSpan(path))
@@ -77,7 +83,8 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin
         value = super().imported_value(module, node)
         return deepcopy(value, self.copy_memo) if self.handler_envs is not None else value
 
-    def instantiate(self, caller, call, target, cls):
+    def instantiate(self, caller, call, target, cls, args=(), keywords=None):
+        keywords = keywords or {}
         if cls.bases or cls.decorator_list or cls.keywords:
             return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
         if any(not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass)) or
@@ -85,34 +92,22 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin
                 for n in cls.body):
             return self.unknown("P_OUTPUT_DYNAMIC_CLASS_BODY", caller, call)
         methods = [n for n in reversed(cls.body) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        if any(n.decorator_list for n in methods):
+            return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
         if any(n.name.startswith("__") and n.name.endswith("__") and n.name!="__init__" for n in methods):
             return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
-        init = next((n for n in methods if n.name == "__init__"), None)
+        init = next((n for n in methods if n.name=="__init__"), None)
         instance = StaticInstance(target.path, cls.name)
         if init is None:
-            return instance
-        params = init.args.posonlyargs + init.args.args
-        if (init.decorator_list or len(params) != 1 or init.args.kwonlyargs
-                or init.args.vararg or init.args.kwarg or isinstance(init, ast.AsyncFunctionDef)):
+            return instance if not args and not keywords else self.unknown("P_OUTPUT_ARGUMENT_BINDING", caller, call)
+        if init.decorator_list or isinstance(init, ast.AsyncFunctionDef):
             return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
-        env = dict(self.module_environment(target.path))
-        env[params[0].arg] = instance
-        for statement in init.body:
-            self.tick()
-            if isinstance(statement, ast.Pass) or (isinstance(statement, ast.Expr)
-                    and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str)):
-                continue
-            targets = statement.targets if isinstance(statement, ast.Assign) else (
-                [statement.target] if isinstance(statement, ast.AnnAssign) else [])
-            if (len(targets) != 1 or not isinstance(targets[0], ast.Attribute)
-                    or not isinstance(targets[0].value, ast.Name) or targets[0].value.id != params[0].arg):
-                return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
-            if statement.value is None:
-                continue
-            value = self.value(target, statement.value, env)
-            if isinstance(value, (UnresolvedValue, PossibleValues, StaticInstance)):
-                return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
-            instance.fields[targets[0].attr] = value
+        # The same bounded interpreter handles arguments, aliases and branches;
+        # custom descriptors, inheritance and metaclasses remain outside scope.
+        value = self.invoke(caller, call, target, init, [instance, *args], dict(keywords))
+        valid = value is None or isinstance(value, PossibleValues) and value.uncertainty is None and all(v is None for v in value.values)
+        if not valid:
+            return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", caller, call)
         return instance
 
 
@@ -135,6 +130,8 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin
 
     def decorate(self, value, call_step):
         self.tick()
+        if isinstance(value, RaisedValue):
+            return replace(value, message=self.decorate(value.message, call_step))
         if isinstance(value, StaticText):
             origin = value.trace or (TraceStep("artifact", value.span, symbol="static output text"),)
             return replace(value, trace=origin + (call_step,))
@@ -297,9 +294,7 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, SnapshotIoMixin
                     return self.invoke(module, node, target, definition, args, kw)
                 if id(node) in self.awaited_calls:
                     return self.unknown("P_OUTPUT_UNSUPPORTED_AWAIT", module, node)
-                if not args and not kw:
-                    return self.instantiate(module, node, target, definition)
-                return self.unknown("P_OUTPUT_UNMODELED_CONSTRUCTOR", module, node)
+                return self.instantiate(module, node, target, definition, args, kw)
             if id(node) in self.awaited_calls and not isinstance(node.func, ast.Attribute):
                 return self.unknown("P_OUTPUT_UNSUPPORTED_AWAIT", module, node)
             if name == "set" and not node.args and not node.keywords:

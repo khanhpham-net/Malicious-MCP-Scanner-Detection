@@ -31,7 +31,7 @@ from .tui import (
     serialize_batch_report,
 )
 
-_SUBCOMMANDS = frozenset({"scan", "inventory", "discover", "scan-code"})
+_SUBCOMMANDS = frozenset({"scan", "inventory", "discover", "scan-code", "snapshot-p", "diff-p-snapshots"})
 
 
 def build_parser(
@@ -232,7 +232,54 @@ def build_parser(
     code.add_argument(
         "--windows-temp", type=Path, help="override TMP and TEMP for the Windows child process"
     )
+    snapshot = subcommands.add_parser("snapshot-p", help="capture hash-only static P metadata; never start a server")
+    snapshot.add_argument("target", type=Path)
+    snapshot.add_argument("--server-id", required=True)
+    snapshot.add_argument("--protocol-version", required=True)
+    snapshot.add_argument("--scope", required=True, help='explicit JSON scope, e.g. {"tenant":"local","transport":"stdio"}')
+    snapshot.add_argument("--revision")
+    snapshot.add_argument("--approved-by", help="human review attestation; omit until the snapshot has been reviewed")
+    snapshot.add_argument("--timeout", type=float, default=60.0)
+    snapshot.add_argument("--output", type=Path, required=True)
+    diff = subcommands.add_parser("diff-p-snapshots", help="compare reviewed baseline P metadata without replacing it")
+    diff.add_argument("baseline", type=Path)
+    diff.add_argument("current", type=Path)
+    diff.add_argument("--output", type=Path, required=True)
     return parser
+
+
+def _execute_p_snapshot_command(args, parser):
+    from .p_snapshot import capture_p_snapshot, compare_p_snapshots
+    try:
+        output = args.output.resolve()
+        if output.exists():
+            raise ValueError("Output already exists; choose a new artifact path.")
+        if args.command == "snapshot-p":
+            target = args.target.resolve()
+            if output == target or target in output.parents:
+                raise ValueError("P snapshot output must be outside the source snapshot.")
+            result = capture_p_snapshot(
+                target, server_id=args.server_id, protocol_version=args.protocol_version,
+                scope=json.loads(args.scope), revision=args.revision,
+                approved_by=args.approved_by, timeout=args.timeout)
+            exit_code = 2 if any(v in {"partial","unmeasured"} for v in result["coverage"].values()) else 0
+        else:
+            if output in {args.baseline.resolve(),args.current.resolve()}:
+                raise ValueError("Diff output cannot overwrite either input.")
+            def read(path):
+                if path.stat().st_size > 5_000_000:
+                    raise ValueError("P snapshot artifact exceeds the 5 MB limit.")
+                return json.loads(path.read_text(encoding="utf-8-sig"))
+            result = compare_p_snapshots(read(args.baseline),read(args.current))
+            exit_code = 2 if result["coverage_status"]=="partial" else 1 if result["review_required"] else 0
+        rendered = json.dumps(result,indent=2,ensure_ascii=True)+"\n"
+        output.parent.mkdir(parents=True,exist_ok=True)
+        with output.open("x",encoding="utf-8") as stream:
+            stream.write(rendered)
+        print(f"Saved P artifact: {output}")
+        return exit_code
+    except (ValueError, OSError, RecursionError) as error:
+        parser.error(str(error))
 
 
 def _execute_scan_command(
@@ -369,6 +416,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog="mcp-scanner", default_format="json")
     args = parser.parse_args(argv)
 
+    if args.command in {"snapshot-p", "diff-p-snapshots"}:
+        return _execute_p_snapshot_command(args, parser)
+
     if args.command == "scan":
         return _execute_scan_command(args, parser, default_target_dot=False)
 
@@ -420,7 +470,7 @@ def mac_main(argv: Sequence[str] | None = None) -> int:
     if args.command == "scan":
         return _execute_scan_command(args, parser, default_target_dot=True)
 
-    if args.command in {"inventory", "discover", "scan-code"}:
+    if args.command in {"inventory", "discover", "scan-code", "snapshot-p", "diff-p-snapshots"}:
         return main(raw_args)
 
     # No subcommand (`mac` or `mac --no-color`): launch interactive menu if running in a terminal

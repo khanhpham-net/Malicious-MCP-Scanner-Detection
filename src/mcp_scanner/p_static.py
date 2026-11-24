@@ -105,6 +105,8 @@ class StaticValueResolver:
         return self.parsed[span.path]
 
     def read(self, path, module, node):
+        if getattr(self,"snapshot_dirty",False):
+            return self.unknown("P_OUTPUT_FILE_AFTER_EFFECT",module,node)
         if not isinstance(path, StaticPath):
             return self.unknown("P_OUTPUT_DYNAMIC_PATH", module, node)
         raw = path.value.replace("\\", "/")
