@@ -157,7 +157,7 @@ class CliTests(unittest.TestCase):
             )
 
             rendered = out_buf.getvalue()
-            self.assertEqual(rc, 1)
+            self.assertEqual(rc, 2)
             self.assertIn("Maintain an Auspicious Cloud", rendered)
             self.assertIn("Select an action:", rendered)
             self.assertIn("Detailed Findings & Coverage Drill-Down", rendered)
@@ -168,6 +168,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(save_file.is_file())
             saved_data = json.loads(save_file.read_text(encoding="utf-8"))
             self.assertEqual(saved_data["policy_status"], "fail")
+            self.assertEqual(saved_data["scan_status"], "partial")
+            self.assertEqual(saved_data["coverage"]["surfaces"]["p_tool_result"], "partial")
 
     def test_mac_batch_mode_detects_collection_and_inspects_samples(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -208,12 +210,14 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             cli_text = cli_buf.getvalue()
-            self.assertEqual(rc, 1)
+            self.assertEqual(rc, 2)
             self.assertIn("Batch Target", cli_text)
             self.assertIn("1 ALERT · 1 CLEAN", cli_text)
             batch_json = json.loads(batch_out.read_text(encoding="utf-8"))
             self.assertEqual(batch_json["artifact_type"], "batch_scan_report")
             self.assertEqual(batch_json["total_snapshots"], 2)
+            self.assertEqual(batch_json["status_counts"]["partial"], 1)
+            self.assertEqual(batch_json["status_counts"]["complete"], 1)
 
             # 2) Interactive menu: paste collection path -> [1] Fast Batch -> [i] SIM_A -> [l] List All -> [q] Quit
             inputs = iter([str(collection), "1", "i", "SIM_A", "l", "q"])
@@ -225,7 +229,7 @@ class CliTests(unittest.TestCase):
                 enable_semgrep=False,
             )
             tui_text = tui_buf.getvalue()
-            self.assertEqual(rc_tui, 1)
+            self.assertEqual(rc_tui, 2)
             self.assertIn("Detected batch collection: 2 snapshots", tui_text)
             self.assertIn("Detailed Findings & Coverage Drill-Down", tui_text)
             self.assertIn("All Scanned Snapshots (2):", tui_text)

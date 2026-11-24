@@ -42,6 +42,8 @@ class CoreRobustnessAuditTests(unittest.TestCase):
                 root,
                 enable_semgrep=enable_semgrep,
                 enable_python_ast=True,
+                # Core M/C/S coverage is independent of bounded P extraction.
+                enable_p_detector=False,
                 rules=[PY_RULES, JS_TS_RULES] if enable_semgrep else None,
                 semgrep=SEMGREP or "semgrep",
                 windows_temp=Path(WINDOWS_TEMP) if WINDOWS_TEMP else None,

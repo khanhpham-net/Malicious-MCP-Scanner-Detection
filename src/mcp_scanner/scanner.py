@@ -33,6 +33,14 @@ from .models import (
     compute_exit_code,
     stable_sha256_id,
 )
+from .p_detector import PDetectionResult, detect_surface_instructions
+from .p_surface import extract_python_tool_descriptions
+from .p_schema import extract_python_input_schema_descriptions
+from .p_resource import extract_python_resource_metadata, extract_python_resource_bodies
+from .p_prompt import extract_python_prompt_metadata, extract_python_prompt_messages
+from .p_js import extract_js_surfaces
+from .p_tool_result import extract_python_tool_results
+from .p_relations import analyze_instruction_relations, RELATION_VERSION
 from .package_json_analyzer import PackageJsonAnalysisResult, analyze_package_json_files
 from .sca_adapter import ScaAnalysisResult, analyze_sca_offline
 from .semgrep_adapter import (
@@ -532,6 +540,7 @@ def run_scan(
     windows_temp: Path | None = None,
     enable_semgrep: bool = True,
     enable_python_ast: bool = True,
+    enable_p_detector: bool = True,
     enable_sca: bool = True,
     osv_db: Path | None = None,
     osv_db_sha256: str | None = None,
@@ -713,6 +722,130 @@ def run_scan(
     diagnostics.extend(py_data["diagnostics"])
     analysis_boundaries.extend(py_data["analysis_boundaries"])
 
+    # Analyze supported English Python metadata through shared P rules.
+    t0 = time.monotonic()
+    p_result = PDetectionResult()
+    p_texts = []
+    relation_status = "skipped"
+    p_status = "skipped"
+    p_surfaces = {
+        "tool_description": "skipped",
+        "input_schema_description": "skipped",
+        "resource_metadata": "skipped",
+        "resource_body": "skipped",
+        "prompt_metadata": "skipped",
+        "prompt_message": "skipped",
+        "tool_result": "skipped",
+    }
+    if enable_p_detector and inventory.python_files():
+        if not enable_python_ast or py_data["status"] in {"failed", "unavailable"}:
+            p_result.status = "partial"
+            p_result.diagnostics.append({
+                "code": "P_DISCOVERY_UNAVAILABLE",
+                "message": "Python discovery is required for P metadata analysis.",
+            })
+            p_surfaces = {key: "partial" for key in p_surfaces}
+        else:
+            extractors = (
+                ("tool_description", extract_python_tool_descriptions),
+                ("input_schema_description", extract_python_input_schema_descriptions),
+                ("resource_metadata", extract_python_resource_metadata),
+                ("resource_body", extract_python_resource_bodies),
+                ("prompt_metadata", extract_python_prompt_metadata),
+                ("prompt_message", extract_python_prompt_messages),
+                ("tool_result", extract_python_tool_results),
+            )
+            for surface, extract in extractors:
+                try:
+                    extracted = extract(inventory, py_data["discovered_servers"], deadline=deadline)
+                    p_texts.extend(extracted.texts)
+                    detected = detect_surface_instructions(extracted.texts, deadline=deadline)
+                    p_result.findings.extend(detected.findings)
+                    p_result.diagnostics.extend(extracted.diagnostics)
+                    p_result.diagnostics.extend(detected.diagnostics)
+                    if "partial" in {extracted.status, detected.status, py_data["status"]}:
+                        p_result.status = "partial"
+                        p_surfaces[surface] = "partial"
+                    else:
+                        p_surfaces[surface] = "scanned" if extracted.texts else "none_found"
+                except Exception as error:
+                    p_result.status = "partial"
+                    p_surfaces[surface] = "failed"
+                    p_result.diagnostics.append({
+                        "code": "P_ANALYSIS_ERROR", "surface": surface,
+                        "message": f"{type(error).__name__}: P metadata analysis failed.",
+                    })
+        p_status = p_result.status
+    elif enable_p_detector:
+        p_surfaces = {key: "unmeasured" for key in p_surfaces}
+    if enable_p_detector and inventory.js_ts_files():
+        try:
+            js_result = extract_js_surfaces(inventory, server_id=resolved_server_id, deadline=deadline)
+            p_texts.extend(js_result.texts)
+            detected = detect_surface_instructions(js_result.texts, deadline=deadline)
+            p_result.findings.extend(detected.findings)
+            p_result.diagnostics.extend(js_result.diagnostics)
+            p_result.diagnostics.extend(detected.diagnostics)
+            if "partial" in {js_result.status, detected.status}:
+                p_result.status = "partial"
+            for surface, js_state in js_result.surfaces.items():
+                previous = p_surfaces[surface]
+                if "partial" in {previous, js_state} or previous == "failed":
+                    p_surfaces[surface] = "partial"
+                elif js_state == "unmeasured" and js_result.status == "partial":
+                    p_surfaces[surface] = "partial"
+                elif "scanned" in {previous, js_state}:
+                    p_surfaces[surface] = "scanned"
+                elif "none_found" in {previous, js_state}:
+                    p_surfaces[surface] = "none_found"
+                else:
+                    p_surfaces[surface] = js_state
+            p_status = p_result.status
+        except Exception as error:
+            p_result.status = p_status = "partial"
+            p_surfaces = {key: "failed" for key in p_surfaces}
+            p_result.diagnostics.append({"code": "P_JS_ANALYSIS_ERROR",
+                "message": f"{type(error).__name__}: JS/TS P extraction failed."})
+    # Offline composition consumes only approved text and existing core facts.
+    # This is a separate bounded analysis scope; it never executes target code.
+    if enable_p_detector:
+        try:
+            relations = analyze_instruction_relations(inventory, py_data["discovered_servers"],
+                p_texts, [*py_data["findings"], *p_result.findings], deadline=deadline)
+            relation_status = relations.status
+            if p_status == "partial":
+                relation_status = "partial"
+            if inventory.js_ts_files():
+                relation_status = "partial"
+                relations.diagnostics.append({"code": "P_RELATION_JS_UNSUPPORTED",
+                    "scope": "Python handler consequence specialization only"})
+            if any(component.get("proved_no_instruction_fields")
+                   for diagnostic in p_result.diagnostics
+                   if diagnostic.get("code") == "P_OUTPUT_COVERAGE_SUMMARY"
+                   for component in diagnostic.get("components", [])):
+                relation_status = "partial"
+                relations.diagnostics.append({"code": "P_RELATION_TOKEN_SCOPE",
+                    "scope": "Existing token certificates cover regex rules only, not relation analysis."})
+            by_id = {finding.finding_id: finding for finding in p_result.findings}
+            by_id.update({finding.finding_id: finding for finding in relations.findings})
+            p_result.findings = list(by_id.values())
+            p_result.diagnostics.extend(relations.diagnostics)
+            if relation_status != "complete":
+                p_result.status = p_status = "partial"
+        except Exception as error:
+            relation_status = "failed"
+            p_result.status = p_status = "partial"
+            p_result.diagnostics.append({"code": "P_RELATION_ANALYSIS_ERROR",
+                "message": f"{type(error).__name__}: Offline relation analysis failed."})
+    diagnostics.extend(p_result.diagnostics)
+    if any(d.get("code") in {"P_SCHEMA_EXTRACTION_BUDGET", "P_EXTRACTION_DEADLINE", "P_DETECTION_DEADLINE", "P_RESOURCE_EXTRACTION_BUDGET", "P_PROMPT_EXTRACTION_BUDGET", "P_OUTPUT_EXTRACTION_BUDGET", "P_JS_EXTRACTION_BUDGET"}
+           for d in p_result.diagnostics):
+        analysis_boundaries.append(AnalysisBoundary(
+            kind="budget_exceeded", location=None,
+            detail="P metadata analysis reached its time or complexity budget.",
+        ))
+    stage_durations["tier2_p_descriptions"] = time.monotonic() - t0
+
     # Stage 4: 1-pass Semgrep CE over inventory-approved code files (Branch A + C)
     _notify("semgrep:start", "Running Semgrep CE rules (Python + JS/TS)")
     t0 = time.monotonic()
@@ -758,6 +891,7 @@ def run_scan(
     raw_findings.extend(sca_result.findings)
     raw_findings.extend(py_data["findings"])
     raw_findings.extend(sg_result.findings)
+    raw_findings.extend(p_result.findings)
     findings = deduplicate_findings(
         raw_findings, semgrep_behavior_classes=sg_result.behavior_classes
     )
@@ -766,6 +900,8 @@ def run_scan(
     _attach_install_script_provenance(findings, pkg_result.install_script_provenance)
 
     partial_reasons: list[str] = []
+    if p_status in {"partial", "failed"}:
+        partial_reasons.append(f"P metadata analysis status: {p_status}")
     if inventory.read_errors:
         partial_reasons.append(f"{len(inventory.read_errors)} file(s) unreadable (IO/AV error)")
     if inventory.skipped_budget:
@@ -892,6 +1028,7 @@ def run_scan(
         ),
     }
     surfaces.update(py_data["surfaces"])
+    surfaces.update({f"p_{key}": value for key, value in p_surfaces.items()})
     if py_files and enable_python_ast and (py_has_dynamic_dispatch or py_has_unsupported_stmt):
         for key in ("tools", "resources", "prompts", "bootstrap"):
             if key in surfaces and surfaces[key] == "scanned":
@@ -937,6 +1074,16 @@ def run_scan(
             "status": "skipped" if sca_result.status == "unmeasured" else sca_result.status,
         },
         {"name": "python_ast", "version": __version__, "status": py_engine_status},
+        {"name": "p_offline_relations", "version": RELATION_VERSION,
+         "status": relation_status, "language": "en", "mode": "offline",
+         "scope": "bounded-invocation-grammar-python-specialized-consequences"},
+        *[
+            {"name": f"p_{surface}", "version": "0.1",
+             "status": {"scanned": "complete", "none_found": "complete",
+                        "unmeasured": "skipped"}.get(status, status),
+             "language": "en", "scope": f"{'python-js-ts' if inventory.js_ts_files() else 'python'}-{surface}-heuristics"}
+            for surface, status in p_surfaces.items()
+        ],
         {
             "name": "semgrep",
             "edition": "OSS",
