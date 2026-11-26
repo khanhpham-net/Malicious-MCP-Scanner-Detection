@@ -127,7 +127,7 @@ def test_resource_metadata_finding_and_body_independent_coverage(tmp_path):
 def guide():
     return helper()
 ''')
-    report = run_scan(tmp_path, enable_semgrep=False)
+    report = run_scan(tmp_path, enable_semgrep=False, strict_p=True)
     assert report.exit_code == 2 and report.scan_status == "partial"
     assert report.coverage.surfaces["p_resource_metadata"] == "scanned"
     assert report.coverage.surfaces["p_resource_body"] == "partial"

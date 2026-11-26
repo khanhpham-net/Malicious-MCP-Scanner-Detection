@@ -105,7 +105,7 @@ def test_path_boundaries_and_missing_files(tmp_path,path,code):
 def test_dynamic_output_is_partial(tmp_path,body,signature):
     _,_,result=extract(tmp_path,body,signature=signature)
     assert result.status=="partial" and not result.texts
-    report=run_scan(tmp_path,enable_semgrep=False)
+    report=run_scan(tmp_path,enable_semgrep=False,strict_p=True)
     assert report.scan_status=="partial" and report.exit_code==2
 
 

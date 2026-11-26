@@ -89,7 +89,7 @@ def review(argument: str):
     result = extract_python_prompt_messages(inventory,discovery.discovered_servers)
     assert result.status == "partial" and not result.texts
     assert any(d["code"] == code for d in result.diagnostics)
-    report=run_scan(tmp_path,enable_semgrep=False)
+    report=run_scan(tmp_path,enable_semgrep=False,strict_p=True)
     assert report.scan_status == "partial" and report.exit_code == 2
     assert report.coverage.surfaces["p_prompt_message"] == "partial"
     assert report.coverage.surfaces["p_prompt_metadata"] == "scanned"
@@ -104,7 +104,7 @@ def review():
 ''')
     result=extract_python_prompt_messages(inventory,discovery.discovered_servers)
     assert result.status=="partial" and len(result.texts)==1
-    report=run_scan(tmp_path,enable_semgrep=False)
+    report=run_scan(tmp_path,enable_semgrep=False,strict_p=True)
     assert report.scan_status=="partial"
     assert any(f.rule_id.startswith("mcp-p-prompt-message-") for f in report.findings)
 
@@ -135,7 +135,7 @@ def test_prompt_metadata_finding_survives_unknown_messages(tmp_path):
 def review():
     return helper()
 ''')
-    report=run_scan(tmp_path,enable_semgrep=False)
+    report=run_scan(tmp_path,enable_semgrep=False,strict_p=True)
     assert report.scan_status=="partial"
     finding,=[f for f in report.findings if f.rule_id.startswith("mcp-p-prompt-metadata-")]
     assert finding.mcp_surface=="A10"

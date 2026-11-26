@@ -541,6 +541,7 @@ def run_scan(
     enable_semgrep: bool = True,
     enable_python_ast: bool = True,
     enable_p_detector: bool = True,
+    strict_p: bool = False,
     enable_sca: bool = True,
     osv_db: Path | None = None,
     osv_db_sha256: str | None = None,
@@ -552,6 +553,9 @@ def run_scan(
     on_stage: Callable[[str, str], None] | None = None,
 ) -> ScanReport:
     """Execute the end-to-end static scan pipeline and return a canonical v1.0 ScanReport."""
+    if strict_p and not enable_p_detector:
+        raise ValueError("Strict P coverage requires the P detector")
+    profile = "static-p-strict" if strict_p else "static-default"
     scan_start = time.monotonic()
     stage_durations: dict[str, float] = {}
     diagnostics: list[dict[str, Any]] = []
@@ -568,7 +572,7 @@ def run_scan(
         fallback_server_id = server_id or stable_sha256_id({"target": str(target)})
         err_msg = "budget_cutoff_seconds and hard_timeout_seconds must be finite positive numbers."
         return ScanReport(
-            scanner=ScannerIdentity(version=__version__),
+            scanner=ScannerIdentity(version=__version__, profile=profile),
             input_provenance=InputProvenance(
                 server_id=fallback_server_id,
                 source_id=source_id,
@@ -630,7 +634,7 @@ def run_scan(
         elapsed = time.monotonic() - scan_start
         fallback_server_id = server_id or stable_sha256_id({"target": str(target)})
         return ScanReport(
-            scanner=ScannerIdentity(version=__version__),
+            scanner=ScannerIdentity(version=__version__, profile=profile),
             input_provenance=InputProvenance(
                 server_id=fallback_server_id,
                 source_id=source_id,
@@ -727,7 +731,10 @@ def run_scan(
     p_result = PDetectionResult()
     p_texts = []
     relation_status = "skipped"
-    p_status = "skipped"
+    p_static_surfaces = {"tool_description", "input_schema_description",
+                         "resource_metadata", "prompt_metadata"}
+    p_static_incomplete = False
+    p_tool_result_incomplete = False
     p_surfaces = {
         "tool_description": "skipped",
         "input_schema_description": "skipped",
@@ -775,7 +782,10 @@ def run_scan(
                         "code": "P_ANALYSIS_ERROR", "surface": surface,
                         "message": f"{type(error).__name__}: P metadata analysis failed.",
                     })
-        p_status = p_result.status
+        p_static_incomplete = any(
+            p_surfaces[surface] in {"partial", "failed"} for surface in p_static_surfaces
+        )
+        p_tool_result_incomplete = p_surfaces["tool_result"] == "partial"
     elif enable_p_detector:
         p_surfaces = {key: "unmeasured" for key in p_surfaces}
     if enable_p_detector and inventory.js_ts_files():
@@ -785,6 +795,19 @@ def run_scan(
             detected = detect_surface_instructions(js_result.texts, deadline=deadline)
             p_result.findings.extend(detected.findings)
             p_result.diagnostics.extend(js_result.diagnostics)
+            js_parser_unavailable = any(
+                diagnostic.get("code") == "P_JS_PARSER_UNAVAILABLE"
+                for diagnostic in js_result.diagnostics
+            )
+            if js_parser_unavailable:
+                analysis_boundaries.append(AnalysisBoundary(
+                    kind="external_lib", location=None,
+                    detail="JS/TS P surfaces could not be measured because the optional parser is unavailable.",
+                ))
+            p_static_incomplete |= any(
+                js_result.surfaces[surface] == "partial" for surface in p_static_surfaces
+            )
+            p_tool_result_incomplete |= js_result.surfaces["tool_result"] == "partial"
             p_result.diagnostics.extend(detected.diagnostics)
             if "partial" in {js_result.status, detected.status}:
                 p_result.status = "partial"
@@ -792,7 +815,7 @@ def run_scan(
                 previous = p_surfaces[surface]
                 if "partial" in {previous, js_state} or previous == "failed":
                     p_surfaces[surface] = "partial"
-                elif js_state == "unmeasured" and js_result.status == "partial":
+                elif js_parser_unavailable and previous in {"scanned", "none_found"}:
                     p_surfaces[surface] = "partial"
                 elif "scanned" in {previous, js_state}:
                     p_surfaces[surface] = "scanned"
@@ -800,10 +823,12 @@ def run_scan(
                     p_surfaces[surface] = "none_found"
                 else:
                     p_surfaces[surface] = js_state
-            p_status = p_result.status
         except Exception as error:
-            p_result.status = p_status = "partial"
-            p_surfaces = {key: "failed" for key in p_surfaces}
+            p_result.status = "partial"
+            p_surfaces = {
+                key: "partial" if state in {"scanned", "none_found", "partial"} else "failed"
+                for key, state in p_surfaces.items()
+            }
             p_result.diagnostics.append({"code": "P_JS_ANALYSIS_ERROR",
                 "message": f"{type(error).__name__}: JS/TS P extraction failed."})
     # Offline composition consumes only approved text and existing core facts.
@@ -813,12 +838,16 @@ def run_scan(
             relations = analyze_instruction_relations(inventory, py_data["discovered_servers"],
                 p_texts, [*py_data["findings"], *p_result.findings], deadline=deadline)
             relation_status = relations.status
-            if p_status == "partial":
+            if p_result.status == "partial":
                 relation_status = "partial"
             if inventory.js_ts_files():
                 relation_status = "partial"
                 relations.diagnostics.append({"code": "P_RELATION_JS_UNSUPPORTED",
                     "scope": "Python handler consequence specialization only"})
+                analysis_boundaries.append(AnalysisBoundary(
+                    kind="runtime_only_unobserved", location=None,
+                    detail="P invocation and handler consequence analysis does not cover JS/TS.",
+                ))
             if any(component.get("proved_no_instruction_fields")
                    for diagnostic in p_result.diagnostics
                    if diagnostic.get("code") == "P_OUTPUT_COVERAGE_SUMMARY"
@@ -831,18 +860,31 @@ def run_scan(
             p_result.findings = list(by_id.values())
             p_result.diagnostics.extend(relations.diagnostics)
             if relation_status != "complete":
-                p_result.status = p_status = "partial"
+                p_result.status = "partial"
         except Exception as error:
             relation_status = "failed"
-            p_result.status = p_status = "partial"
+            p_result.status = "partial"
             p_result.diagnostics.append({"code": "P_RELATION_ANALYSIS_ERROR",
                 "message": f"{type(error).__name__}: Offline relation analysis failed."})
     diagnostics.extend(p_result.diagnostics)
-    if any(d.get("code") in {"P_SCHEMA_EXTRACTION_BUDGET", "P_EXTRACTION_DEADLINE", "P_DETECTION_DEADLINE", "P_RESOURCE_EXTRACTION_BUDGET", "P_PROMPT_EXTRACTION_BUDGET", "P_OUTPUT_EXTRACTION_BUDGET", "P_JS_EXTRACTION_BUDGET"}
-           for d in p_result.diagnostics):
+    p_codes = {d.get("code", "") for d in p_result.diagnostics}
+    p_budget_exceeded = any(code.endswith(("_BUDGET", "_DEADLINE")) for code in p_codes)
+    p_analysis_error = bool(p_codes & {
+        "P_ANALYSIS_ERROR", "P_JS_ANALYSIS_ERROR", "P_RELATION_ANALYSIS_ERROR",
+        "P_DISCOVERY_UNAVAILABLE", "P_JS_PARSE_ERROR", "P_JS_SOURCE_UNAVAILABLE",
+        "P_SOURCE_PARSE_ERROR", "P_SOURCE_UNAVAILABLE",
+        "P_RESOURCE_PARSE_ERROR", "P_RESOURCE_SOURCE_UNAVAILABLE",
+        "P_PROMPT_PARSE_ERROR", "P_PROMPT_SOURCE_UNAVAILABLE", "P_OUTPUT_FILE_UNAVAILABLE",
+    })
+    if p_budget_exceeded:
         analysis_boundaries.append(AnalysisBoundary(
             kind="budget_exceeded", location=None,
-            detail="P metadata analysis reached its time or complexity budget.",
+            detail="P analysis reached its time or complexity budget.",
+        ))
+    if p_tool_result_incomplete:
+        analysis_boundaries.append(AnalysisBoundary(
+            kind="runtime_only_unobserved", location=None,
+            detail="Static P analysis did not establish all possible tool results. See P surface diagnostics.",
         ))
     stage_durations["tier2_p_descriptions"] = time.monotonic() - t0
 
@@ -900,8 +942,12 @@ def run_scan(
     _attach_install_script_provenance(findings, pkg_result.install_script_provenance)
 
     partial_reasons: list[str] = []
-    if p_status in {"partial", "failed"}:
-        partial_reasons.append(f"P metadata analysis status: {p_status}")
+    if p_budget_exceeded:
+        partial_reasons.append("P analysis reached its time or complexity budget")
+    if p_analysis_error or p_static_incomplete:
+        partial_reasons.append("P analysis failed or could not cover static metadata")
+    if strict_p and p_result.status == "partial":
+        partial_reasons.append("Strict P coverage is incomplete")
     if inventory.read_errors:
         partial_reasons.append(f"{len(inventory.read_errors)} file(s) unreadable (IO/AV error)")
     if inventory.skipped_budget:
@@ -1103,7 +1149,7 @@ def run_scan(
         scanner=ScannerIdentity(
             name="mcp-scanner",
             version=__version__,
-            profile="static-default",
+            profile=profile,
             ruleset_sha256=sg_result.ruleset_sha256,
             engines=engines,
         ),

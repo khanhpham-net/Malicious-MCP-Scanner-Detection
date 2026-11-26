@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import unittest
@@ -15,6 +16,7 @@ from mcp_scanner.models import (
     make_root_cause_group_id,
 )
 from mcp_scanner.scanner import deduplicate_findings, run_scan
+from mcp_scanner.p_surface import SurfaceExtractionResult
 from tests.test_models_and_schema import SCHEMA_PATH, _validate_against_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +32,29 @@ class ScanPipelineTests(unittest.TestCase):
         raw = report.to_dict()
         _validate_against_schema(raw, schema, schema)
         self.assertEqual(ScanReport.from_dict(raw).to_dict(), raw)
+
+    def test_p_analysis_error_and_budget_still_make_default_scan_partial(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server.py").write_text("value = 1\n", encoding="utf-8")
+            with patch("mcp_scanner.scanner.extract_python_tool_descriptions",
+                       side_effect=RuntimeError("test extractor failure")):
+                failed = run_scan(root, enable_semgrep=False, enable_sca=False)
+            budget_result = SurfaceExtractionResult(
+                status="partial", diagnostics=[{"code": "P_OUTPUT_EXTRACTION_BUDGET"}]
+            )
+            with patch("mcp_scanner.scanner.extract_python_tool_results",
+                       return_value=budget_result):
+                exhausted = run_scan(root, enable_semgrep=False, enable_sca=False)
+
+        for report, code in ((failed, "P_ANALYSIS_ERROR"),
+                             (exhausted, "P_OUTPUT_EXTRACTION_BUDGET")):
+            with self.subTest(code=code):
+                self._assert_schema_valid(report)
+                self.assertEqual(report.scan_status, "partial")
+                self.assertEqual(report.exit_code, 2)
+                self.assertIn(code, {item.get("code") for item in report.diagnostics})
+        self.assertIn("budget_exceeded", {b.kind for b in exhausted.coverage.analysis_boundaries})
 
     def test_clean_package_json_only_repo_produces_complete_exit_0(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -464,6 +489,46 @@ class ScanPipelineTests(unittest.TestCase):
 
 @unittest.skipUnless(SEMGREP, "set MCP_SCANNER_TEST_SEMGREP to run real Semgrep pipeline tests")
 class RealSemgrepPipelineTests(unittest.TestCase):
+    def test_missing_js_p_parser_affects_only_strict_scan_status(self) -> None:
+        original_import = builtins.__import__
+
+        def without_parser(name, *args, **kwargs):
+            if name == "tree_sitter":
+                raise ModuleNotFoundError(name)
+            return original_import(name, *args, **kwargs)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.ts").write_text("export const ok = true;\n", encoding="utf-8")
+            options = dict(rules=[JS_TS_RULES], semgrep=SEMGREP,
+                           windows_temp=Path(WINDOWS_TEMP) if WINDOWS_TEMP else None)
+            with patch("builtins.__import__", side_effect=without_parser):
+                default = run_scan(root, **options)
+                strict = run_scan(root, strict_p=True, **options)
+                (root / "server.py").write_text(
+                    "from mcp.server.fastmcp import FastMCP\n"
+                    "mcp = FastMCP('demo')\n"
+                    "@mcp.tool()\n"
+                    "def status() -> str:\n"
+                    "    \"\"\"Return the current status.\"\"\"\n"
+                    "    return 'ok'\n", encoding="utf-8",
+                )
+                mixed = run_scan(root, **options)
+            parser_available = run_scan(root, strict_p=True, **options)
+
+        self.assertEqual((default.scan_status, default.exit_code), ("complete", 0))
+        self.assertEqual((strict.scan_status, strict.exit_code), ("partial", 2))
+        self.assertEqual((mixed.scan_status, mixed.exit_code), ("complete", 0))
+        for report in (default, strict, mixed):
+            self.assertEqual(report.coverage.surfaces["js_ts_code"], "scanned")
+            self.assertIn("P_JS_PARSER_UNAVAILABLE", {d.get("code") for d in report.diagnostics})
+        self.assertEqual(default.coverage.surfaces["p_tool_description"], "unmeasured")
+        self.assertEqual(mixed.coverage.surfaces["p_tool_description"], "partial")
+        self.assertEqual(next(e["status"] for e in default.scanner.engines
+                              if e["name"] == "p_tool_description"), "skipped")
+        self.assertEqual((parser_available.scan_status, parser_available.exit_code), ("partial", 2))
+        self.assertIn("P_RELATION_JS_UNSUPPORTED", {d.get("code") for d in parser_available.diagnostics})
+
     def test_real_python_ast_and_semgrep_merge_single_call_without_double_penalty(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
