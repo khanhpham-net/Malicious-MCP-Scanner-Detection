@@ -107,8 +107,11 @@ def build_parser(
         action="store_true",
         help="disable ANSI colors in terminal UI output",
     )
-    scan.add_argument("--no-p-detector", action="store_true",
-                      help="disable English Python P-surface analysis")
+    p_mode = scan.add_mutually_exclusive_group()
+    p_mode.add_argument("--no-p-detector", action="store_true",
+                        help="disable P-surface analysis")
+    p_mode.add_argument("--strict-p", action="store_true",
+                        help="require complete P-surface and relation coverage")
     scan.add_argument("--server-id", help="stable server identifier override")
     scan.add_argument("--source-id", help="upstream source identifier (e.g. github:org/repo)")
     scan.add_argument(
@@ -333,6 +336,7 @@ def _execute_scan_command(
             enable_semgrep=not args.no_semgrep,
             enable_python_ast=not args.no_python_ast,
             enable_p_detector=not args.no_p_detector,
+            strict_p=args.strict_p,
             enable_sca=not args.no_sca,
             osv_db=args.osv_db,
             osv_db_sha256=args.osv_db_sha256,
@@ -379,6 +383,7 @@ def _execute_scan_command(
         enable_semgrep=not args.no_semgrep,
         enable_python_ast=not args.no_python_ast,
         enable_p_detector=not args.no_p_detector,
+        strict_p=args.strict_p,
         enable_sca=not args.no_sca,
         osv_db=args.osv_db,
         osv_db_sha256=args.osv_db_sha256,

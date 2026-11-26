@@ -49,7 +49,7 @@ def source(tmp_path,surface,payload,layout,opaque):
 @pytest.mark.parametrize("opaque",[False,True],ids=["fully-modeled","opaque-effect"])
 def test_behavior_reaches_each_surface_even_with_an_opaque_effect(tmp_path,surface,rule,payload,layout,opaque):
     source(tmp_path,surface,payload,layout,opaque)
-    r=run_scan(tmp_path,enable_semgrep=False,enable_sca=False)
+    r=run_scan(tmp_path,enable_semgrep=False,enable_sca=False,strict_p=True)
     expected=f"mcp-p-{surface}-"+rule
     assert any(f.rule_id==expected for f in r.findings)
     assert r.scan_status==("partial" if opaque else "complete")
@@ -60,7 +60,7 @@ def test_behavior_reaches_each_surface_even_with_an_opaque_effect(tmp_path,surfa
 @pytest.mark.parametrize("opaque",[False,True])
 def test_quoted_training_material_is_not_an_active_instruction(tmp_path,surface,rule,payload,opaque):
     source(tmp_path,surface,"The tutorial explains the phrase "+payload.lower()+" as an attack example.","E1",opaque)
-    r=run_scan(tmp_path,enable_semgrep=False,enable_sca=False)
+    r=run_scan(tmp_path,enable_semgrep=False,enable_sca=False,strict_p=True)
     assert not any(f.category=="P" for f in r.findings)
     assert r.scan_status==("partial" if opaque else "complete")
 

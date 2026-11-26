@@ -181,7 +181,7 @@ mcp=FastMCP('fixture')
 def echo(code:Annotated[str,Field(pattern=r'^[A-Z]+$')])->str:
     return code
 """
-    report = scan_source(tmp_path, source)
+    report = scan_source(tmp_path, source, strict_p=True)
     assert not chains(report)
     assert any(d.get("code") == "P_RELATION_TOKEN_SCOPE" for d in report.diagnostics)
     assert report.scan_status == "partial"
