@@ -8,7 +8,7 @@ from itertools import product
 import operator
 
 from .models import SourceSpan, TraceStep
-from .p_domains import ClassSymbol, NonTextValue, SequenceDomain, StaticLambda, RuntimeInputText, BuiltinType, BuiltinFunction, RaisedValue, StaticRaised, CaughtException, AnnotationValue
+from .p_domains import ClassSymbol, NonTextValue, SequenceDomain, StaticLambda, RuntimeInputText, BoundedInputText, BuiltinType, BuiltinFunction, RaisedValue, StaticRaised, CaughtException, AnnotationValue
 from .p_static import StaticText, UnresolvedValue
 from .p_text_constraints import ValidatedToken, ascii_token_pattern
 from .python_ast.index import dotted, location
@@ -288,6 +288,27 @@ class ExpressionFlowMixin:
                       and isinstance(k.value,ast.Constant) and isinstance(k.value.value,str)),None)
         if ascii_token_pattern(pattern):
             return ValidatedToken("P_OUTPUT_VALIDATED_TOKEN",value.span,pattern)
+        if any(name == "pydantic" or name.startswith("pydantic.") for name in self.module_paths):
+            return value
+        names = [keyword.arg for keyword in field.keywords]
+        if len(names) != len(set(names)) or None in names:
+            return value
+        bounds = {}
+        for keyword in field.keywords:
+            if keyword.arg not in {"min_length", "max_length"}:
+                continue
+            if not isinstance(keyword.value, ast.Constant) or type(keyword.value.value) is not int or keyword.value.value < 0:
+                return value
+            bounds[keyword.arg] = keyword.value.value
+        if bounds:
+            lower = max(getattr(value, "min_length", 0), bounds.get("min_length", 0))
+            upper = bounds.get("max_length", getattr(value, "max_length", None))
+            previous_upper = getattr(value, "max_length", None)
+            if previous_upper is not None and upper is not None:
+                upper = min(previous_upper, upper)
+            if upper is not None and lower > upper:
+                return self.unknown("P_OUTPUT_UNVERIFIED_INPUT_CONTRACT", module, field)
+            return BoundedInputText(value.code, value.span, lower, upper)
         return value
 
     def comparable_domain(self,value):
@@ -768,6 +789,11 @@ class ExpressionFlowMixin:
     def expression_value(self,module,node,env):
         from .p_output_flow import StaticMapping,StaticInstance,PossibleValues
         self.tick()
+        if isinstance(node, ast.Tuple) and getattr(self, "_loop_transfer", None) is not None:
+            return tuple(self.value(module, element, env) for element in node.elts)
+        if isinstance(node, ast.List) and not any(isinstance(element, ast.Starred) for element in node.elts):
+            from .p_loop_domains import LoopLiteralList
+            return LoopLiteralList(self.value(module, element, env) for element in node.elts)
         if node is None:return None
         if isinstance(node,ast.Set):
             from .p_output_flow import StaticSet
@@ -799,9 +825,11 @@ class ExpressionFlowMixin:
             condition=self.value(module,node.test,env);truth=self.truth(condition)
             if truth is not None:return self.value(module,node.body if truth else node.orelse,env)
             origin=self.outcome("next",env);values=[]
-            for expression in (node.body,node.orelse):
+            for selected, expression in ((True,node.body),(False,node.orelse)):
                 self.activate(origin)
                 local=self.fork_environment(env)
+                if not self.refine_none_guard(node.test, selected, local):
+                    continue
                 values.append(self.value(module,expression,local))
             return PossibleValues(tuple(values),self.conditional_gap(condition))
         if isinstance(node,ast.BinOp):
@@ -837,6 +865,10 @@ class ExpressionFlowMixin:
                 if truth is not None:return choose(index+1,local)
                 origin=self.outcome("next",local)
                 branch=self.fork_environment(local)
+                continuing = isinstance(node.op, ast.And)
+                if not self.refine_none_guard(node.values[index], continuing, branch):
+                    self.activate(origin)
+                    return value
                 rest=choose(index+1,branch)
                 self.activate(origin)
                 returned=False if isinstance(node.op,ast.And) and isinstance(value,NonTextValue) and value.kind=="bool" else (
@@ -922,7 +954,7 @@ class ExpressionFlowMixin:
             snapshot_name=name in {"json.loads","json.load"} and not found
             supported_method=isinstance(node.func,ast.Attribute) and node.func.attr in {
                 "items","keys","values","get","model_dump","model_validate","lower","upper","casefold","strip","lstrip","rstrip","startswith","endswith","replace","split","join",
-                "append","extend","pop","count","clear","reverse","update",
+                "append","extend","pop","count","clear","reverse","update","setdefault","copy",
                 "open","read","read_text","read_bytes","decode","exists","is_file","is_symlink","fromkeys","isdigit","isdecimal","isalnum"}
             if name in builtins and not found or found and isinstance(found[1],ast.ClassDef) and self.simple_model(*found) or name=="getattr" or supported_method or snapshot_name:
                 args=[self.value(module,a,env) for a in node.args]
@@ -944,7 +976,15 @@ class ExpressionFlowMixin:
                 if supported_method:
                     receiver=self.value(module,node.func.value,env)
                     if id(node) in self.awaited_calls:return self.unknown("P_OUTPUT_UNSUPPORTED_AWAIT",module,node)
-                    mutators={"append","extend","pop","clear","reverse","update"}
+                    mutators={"append","extend","pop","clear","reverse","update","setdefault"}
+                    # A proved private loop accumulator accepts the whole
+                    # immutable choice as one weak update. Lifting append over
+                    # alternatives would perform multiple writes to one heap.
+                    from .p_loop_domains import LoopSequence
+                    if (getattr(self, "_loop_transfer", None) is not None
+                            and isinstance(receiver, LoopSequence) and node.func.attr == "append"
+                            and len(args) == 1 and not kw):
+                        return self.loop_collection_method(module, node, receiver, "append", args, kw)
                     if node.func.attr in mutators and (isinstance(receiver,PossibleValues) or any(isinstance(v,PossibleValues) for v in args)):
                         gap=self.unknown("P_OUTPUT_MUTATION_ALTERNATIVES",module,node)
                         if isinstance(receiver,list):receiver[:]=[gap]

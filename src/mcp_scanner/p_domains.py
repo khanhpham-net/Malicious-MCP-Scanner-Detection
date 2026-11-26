@@ -22,6 +22,19 @@ class SequenceDomain:
     max_length: int | None = None
 
 
+@dataclass
+class MappingDomain:
+    """Validated mapping shape; membership and runtime key text remain unknown.
+
+    This is mutable so aliases share the same abstract object. Neither a key
+    nor a value domain certifies that unobserved strings contain no directive.
+    """
+    key: Any
+    value: Any
+    min_length: int = 0
+    max_length: int | None = None
+
+
 @dataclass(frozen=True)
 class ClassSymbol:
     path: str
@@ -50,6 +63,13 @@ class FlowOutcome:
 class RuntimeInputText(UnresolvedValue):
     """Unobserved text from a declared validated str input; not a safe output."""
     pass
+
+
+@dataclass(frozen=True)
+class BoundedInputText(RuntimeInputText):
+    """Unobserved input text with validated length bounds, never safe text."""
+    min_length: int = 0
+    max_length: int | None = None
 
 
 @dataclass(frozen=True)

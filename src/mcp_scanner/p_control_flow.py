@@ -5,7 +5,7 @@ import ast
 from copy import deepcopy
 
 from .models import TraceStep
-from .p_domains import FlowOutcome, NonTextValue, SequenceDomain, RuntimeInputText, RaisedValue, StaticRaised, CaughtException
+from .p_domains import FlowOutcome, NonTextValue, SequenceDomain, MappingDomain, RuntimeInputText, BoundedInputText, RaisedValue, StaticRaised, CaughtException
 from .p_static import StaticFile, StaticText, UnresolvedValue
 from .p_snapshot_io import BinaryFile
 from .python_ast.index import dotted, location
@@ -40,6 +40,8 @@ class ControlFlowMixin:
             return bool(value.entries)
         if isinstance(value, StaticSet):
             return bool(value.values)
+        if isinstance(value, (MappingDomain, SequenceDomain)):
+            return False if value.max_length == 0 else True if value.min_length > 0 else None
         return None
 
     def conditional_gap(self, value):
@@ -61,17 +63,32 @@ class ControlFlowMixin:
             if isinstance(value, (list, tuple)) and len(target.elts) == len(value):
                 return all(self.bind_target(module, t, v, env) for t, v in zip(target.elts, value))
             if isinstance(value, SequenceDomain):
+                if value.min_length != len(target.elts) or value.max_length != len(target.elts):
+                    return False
                 return all(self.bind_target(module, t, value.element, env) for t in target.elts)
             return False
         if isinstance(target, ast.Attribute):
             receiver = self.value(module, target.value, env)
             if isinstance(receiver, StaticInstance):
+                if getattr(receiver, "p_loop_readonly", False):
+                    return False
+                if getattr(receiver, "p_frozen", False):
+                    return False
                 receiver.fields[target.attr] = value
                 return True
         if isinstance(target, ast.Subscript):
             receiver = self.value(module, target.value, env)
             source_key = self.value(module, target.slice, env)
             key = self.literal(source_key)
+            if getattr(receiver, "p_loop_readonly", False):
+                return False
+            loop_assignment = getattr(self, "loop_bind_subscript", None)
+            if loop_assignment is not None:
+                result = loop_assignment(module, target, receiver, source_key, value)
+                if result is not NotImplemented:
+                    return result
+            if isinstance(receiver, MappingDomain):
+                return self.structured_bind_subscript(module, target, receiver, source_key, value)
             if isinstance(receiver, StaticMapping) and type(key) in {str, int, float, bool, type(None)}:
                 original = receiver.entries[key][0] if key in receiver.entries else source_key
                 receiver.entries[key] = original, value
@@ -121,6 +138,51 @@ class ControlFlowMixin:
             states = following
         return states
 
+    def refine_none_guard(self, test, selected, env):
+        """Refine identity guards without borrowing equality or truth coercion.
+
+        True conjunctions and false disjunctions imply every operand. Other
+        boolean paths do not, so no fact is inferred from those expressions.
+        Unknown domains/uncertainty are retained instead of mistaken for None.
+        """
+        from .p_output_flow import PossibleValues
+        self.tick()
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return self.refine_none_guard(test.operand, not selected, env)
+        if isinstance(test, ast.BoolOp):
+            # A later operand may change state. Do not reuse an earlier guard
+            # as a fact about the environment after an effectful expression.
+            if any(isinstance(node, (ast.Call, ast.NamedExpr, ast.Await, ast.Yield, ast.YieldFrom))
+                   for node in ast.walk(test)):
+                return True
+            implied = isinstance(test.op, ast.And) and selected or isinstance(test.op, ast.Or) and not selected
+            return not implied or all(self.refine_none_guard(term, selected, env) for term in test.values)
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+                and isinstance(test.ops[0], (ast.Is, ast.IsNot))):
+            return True
+        left, right = test.left, test.comparators[0]
+        if isinstance(left, ast.Constant) and left.value is None:
+            left, right = right, left
+        if not (isinstance(left, ast.Name) and isinstance(right, ast.Constant) and right.value is None
+                and left.id in env):
+            return True
+        old = env[left.id]
+        pending = [old]
+        while pending:
+            self.tick()
+            value = pending.pop()
+            if isinstance(value, PossibleValues):
+                if value.uncertainty is not None:
+                    return True
+                pending.extend(value.values)
+        wanted_none = selected == isinstance(test.ops[0], ast.Is)
+        options = self._summary_parts([old])
+        kept = [v for v in options if isinstance(v, UnresolvedValue) or (v is None) == wanted_none]
+        if not kept:
+            return False
+        env[left.id] = kept[0] if len(kept) == 1 else PossibleValues(tuple(kept), None)
+        return True
+
     def branch_paths(self, module, statement, env):
         condition = self.value(module, statement.test, env)
         truth = self.truth(condition)
@@ -131,12 +193,16 @@ class ControlFlowMixin:
         for selected, statements in ((True, statement.body), (False, statement.orelse)):
             self.activate(origin)
             local = self.fork_environment(env)
+            if not self.refine_none_guard(statement.test, selected, local):
+                continue
             if isinstance(statement.test, ast.Name):
                 old = local.get(statement.test.id)
                 if isinstance(old, NonTextValue) and old.kind == "bool":
                     local[statement.test.id] = selected
             test=statement.test
-            if isinstance(test,ast.Compare) and len(test.ops)==1 and isinstance(test.left,ast.Name) and isinstance(test.comparators[0],ast.Constant):
+            if (isinstance(test,ast.Compare) and len(test.ops)==1 and isinstance(test.left,ast.Name)
+                    and isinstance(test.comparators[0],ast.Constant)
+                    and not (test.comparators[0].value is None and isinstance(test.ops[0],(ast.Is,ast.IsNot)))):
                 from .p_output_flow import PossibleValues
                 name=test.left.id;literal=test.comparators[0].value;old=local.get(name)
                 equality=isinstance(test.ops[0],(ast.Eq,ast.Is))
@@ -157,6 +223,8 @@ class ControlFlowMixin:
     def for_paths(self, module, statement, env, iterable=_NO_ITERABLE):
         from .p_output_flow import PossibleValues
         iterable = self.value(module, statement.iter, env) if iterable is _NO_ITERABLE else iterable
+        if isinstance(iterable, MappingDomain):
+            iterable = SequenceDomain(iterable.key, iterable.min_length, iterable.max_length)
         if isinstance(iterable, PossibleValues):
             origin = self.outcome("next", env)
             results = []
@@ -430,17 +498,21 @@ class ControlFlowMixin:
         seen=set() if seen is None else seen
         if isinstance(value,SequenceDomain):
             return ("sequence",self.semantic_key(value.element,seen),value.min_length,value.max_length)
+        if isinstance(value,MappingDomain):
+            return ("mapping-domain",self.semantic_key(value.key,seen),self.semantic_key(value.value,seen),value.min_length,value.max_length)
         if isinstance(value,(RaisedValue,CaughtException)):
             return ("exception",value.exception,self.semantic_key(value.message,seen))
         if isinstance(value,StaticText):return ("text",value.value)
+        if isinstance(value,BoundedInputText):
+            return ("bounded-input-text",value.code,value.span.path,value.span.start_line,value.min_length,value.max_length)
         if value is None or type(value) in {str,int,float,bool}:return (type(value).__name__,value)
         if id(value) in seen:return ("cycle",type(value).__name__)
         seen=seen|{id(value)}
-        if isinstance(value,StaticMapping):return ("map",tuple((k,self.semantic_key(v,seen)) for k,(_,v) in value.entries.items()))
-        if isinstance(value,StaticInstance):return ("instance",value.path,value.class_name,tuple((k,self.semantic_key(v,seen)) for k,v in value.fields.items()))
-        if isinstance(value,(list,tuple)):return ("list",tuple(self.semantic_key(v,seen) for v in value))
+        if isinstance(value,StaticMapping):return ("map",getattr(value,"p_loop_readonly",False),tuple((k,self.semantic_key(v,seen)) for k,(_,v) in value.entries.items()))
+        if isinstance(value,StaticInstance):return ("instance",value.path,value.class_name,getattr(value,"p_frozen",False),getattr(value,"p_loop_readonly",False),tuple((k,self.semantic_key(v,seen)) for k,v in value.fields.items()))
+        if isinstance(value,(list,tuple)):return (type(value).__name__,getattr(value,"p_loop_readonly",False),tuple(self.semantic_key(v,seen) for v in value))
         if isinstance(value,StaticSet):return ("set",tuple(self.semantic_key(v,seen) for v in value.values))
-        if isinstance(value,PossibleValues):return ("choices",tuple(self.semantic_key(v,seen) for v in value.values))
+        if isinstance(value,PossibleValues):return ("choices",tuple(self.semantic_key(v,seen) for v in value.values),self.semantic_key(value.uncertainty,seen))
         if isinstance(value,UnresolvedValue):return ("unknown",value.code,value.span.path,value.span.start_line)
         if isinstance(value,NonTextValue):return ("numeric",value.kind)
         return ("domain",type(value).__name__)
@@ -466,6 +538,12 @@ class ControlFlowMixin:
                     source=next(v.entries[key][0] for v in variants if key in v.entries)
                     entries[key]=(source,merged([v.entries.get(key,(None,None))[1] for v in variants]))
                 original.entries=entries
+            elif isinstance(original,MappingDomain) and all(isinstance(v,MappingDomain) for v in variants):
+                original.key=merged([v.key for v in variants])
+                original.value=merged([v.value for v in variants])
+                original.min_length=min(v.min_length for v in variants)
+                original.max_length=(None if any(v.max_length is None for v in variants)
+                                     else max(v.max_length for v in variants))
             elif isinstance(original,StaticInstance) and all(isinstance(v,StaticInstance) for v in variants):
                 keys=list(dict.fromkeys(k for v in variants for k in v.fields))
                 original.fields={k:merged([v.fields.get(k) for v in variants]) for k in keys}

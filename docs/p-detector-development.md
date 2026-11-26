@@ -201,3 +201,36 @@ It still detected only 20/25 P fixtures; the new generic English rule and flow
 changes were then evaluated against these identical English inputs.
 The corpus's strict snapshot-bound admission now marks the five translated
 snapshots pending renewed review; do not use --auto-admit to bypass that gate.
+
+## Structured/API checkpoint — 2026-11-25
+
+The P output interpreter now preserves heterogeneous tuple positions, typed
+mapping shapes and weak updates through aliases and helper branches. Pure API
+summaries check supported argument variants and retain errors or uncertainty.
+These are language/API models; no corpus identifier, business field or label is
+used to select detector behavior.
+
+Supported Pydantic v2 constructors are checked against reviewed numeric, length
+and bounded ASCII pattern constraints. Immutable local/imported annotation
+aliases are resolved without target imports. Pattern proof uses a bounded
+non-backtracking model of a concatenation grammar, not arbitrary target regex
+execution. Unsupported pattern dialects, validators, constructor aliases and
+ambiguous union coercions retain partial coverage.
+
+Validated tool input length bounds may prove a compatible constructor accepts
+an argument. They never make unknown text safe for P. Stripping drops the
+original lower length bound; Unicode case conversion and replacement drop
+length certificates. Reflected runtime text is still unobserved. Defaults are
+not falsely treated as having passed validation.
+
+Implementation semantics were checked against the documented contracts:
+[standard types](https://pydantic.dev/docs/validation/2.12/api/pydantic/standard_library_types/)
+and [unions](https://pydantic.dev/docs/validation/latest/concepts/unions/).
+Tests interpret source fixtures only; they do not import or run target models.
+This does not claim complete Pydantic runtime emulation or held-out accuracy.
+
+The unfinished collection-loop widening draft is excluded from this checkpoint.
+Its three acceptance cases remain explicitly skipped until that separate step
+has been independently verified. The source and dataset snapshots used for
+regression are hashed; the seven earlier coverage regressions are restored
+without changing dataset code, labels or coverage-status policy.
