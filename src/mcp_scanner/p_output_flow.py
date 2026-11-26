@@ -12,6 +12,8 @@ from .p_domains import RaisedValue
 from .p_flow_summary import FlowSummaryMixin
 from .p_control_flow import ControlFlowMixin
 from .p_expression_flow import ExpressionFlowMixin
+from .p_structured_flow import StructuredFlowMixin
+from .p_pure_api import PureApiMixin
 from .p_snapshot_io import SnapshotIoMixin
 
 
@@ -39,7 +41,7 @@ class StaticInstance:
     fields: dict = field(default_factory=dict)
 
 
-class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, FlowSummaryMixin, SnapshotIoMixin, StaticValueResolver):
+class OutputValueResolver(StructuredFlowMixin, PureApiMixin, ExpressionFlowMixin, ControlFlowMixin, FlowSummaryMixin, SnapshotIoMixin, StaticValueResolver):
     """Interpret a deliberately small subset of first-party return flows.
 
     Unknown runtime branches preserve possible text with partial coverage.
@@ -142,6 +144,20 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, FlowSummaryMixi
         if isinstance(value, list):
             value[:] = [self.decorate(v, call_step) for v in value]
             return value
+        if isinstance(value, tuple):
+            return tuple(self.decorate(v, call_step) for v in value)
+        from .p_domains import MappingDomain, SequenceDomain
+        if isinstance(value, MappingDomain):
+            value.key = self.decorate(value.key, call_step)
+            value.value = self.decorate(value.value, call_step)
+            return value
+        if isinstance(value, SequenceDomain):
+            element = self.decorate(value.element, call_step)
+            from .p_loop_domains import LoopSequence
+            if isinstance(value, LoopSequence):
+                value.update_element(element)
+                return value
+            return replace(value, element=element)
         if isinstance(value, PossibleValues):
             return replace(value, values=tuple(self.decorate(v, call_step) for v in value.values))
         return value
@@ -233,8 +249,15 @@ class OutputValueResolver(ExpressionFlowMixin, ControlFlowMixin, FlowSummaryMixi
                 for child in member.values:collect(child,seen)
             elif isinstance(member,StaticMapping):
                 for _,child in member.entries.values():collect(child,seen)
-            elif isinstance(member,list):
+            elif isinstance(member,(list,tuple)):
                 for child in member:collect(child,seen)
+            else:
+                from .p_domains import MappingDomain, SequenceDomain
+                if isinstance(member, MappingDomain):
+                    collect(member.key, seen)
+                    collect(member.value, seen)
+                elif isinstance(member, SequenceDomain):
+                    collect(member.element, seen)
         collect(value)
         return self.decorate(value, TraceStep("call", location(caller.path, call), symbol=function.name))
 

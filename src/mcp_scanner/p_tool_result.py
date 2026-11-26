@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import replace
 from .models import SourceSpan, TraceStep
 from .p_surface import SurfaceText
-from .p_domains import NonTextValue, SequenceDomain
+from .p_domains import NonTextValue, SequenceDomain, MappingDomain
 from .p_text_constraints import ValidatedToken, token_proof_available
 from .python_ast.index import location
 from .p_static import (
@@ -34,6 +34,10 @@ class _OutputExtractor(OutputValueResolver):
             return
         if isinstance(value, SequenceDomain):
             self.emit(value.element, context, returned, field_path + "[*]", possible=True)
+        elif isinstance(value, MappingDomain):
+            if value.max_length != 0:
+                self.emit(value.key, context, returned, field_path + ".key[*]", possible=True)
+                self.emit(value.value, context, returned, field_path + ".value[*]", possible=True)
         elif isinstance(value, PossibleValues):
             self.emit(value.uncertainty, context, returned, field_path)
             for member in value.values:
@@ -63,7 +67,7 @@ class _OutputExtractor(OutputValueResolver):
                 declaration_span=context["declaration"], trace=trace,
                 field_path=field_path, limitations=limits,
             ))
-        elif isinstance(value, list):
+        elif isinstance(value, (list, tuple)):
             for index, member in enumerate(value):
                 self.emit(member, context, returned, f"{field_path}[{index}]", possible=possible)
         elif isinstance(value, (_File, _Path, StaticInstance, StaticSet, bytes, complex)):
