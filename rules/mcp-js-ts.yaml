@@ -49,7 +49,7 @@ rules:
               - pattern-inside: |
                   var $CP = require("node:child_process")
                   ...
-      # 2. Direct chained require("child_process").exec(...)
+      # 2. Direct chained require("child_process").exec(...) / .execSync(...)
       - patterns:
           - pattern-either:
               - pattern: require("child_process").exec($CMD, ...)
@@ -75,7 +75,19 @@ rules:
                   const { ..., exec, ... } = require("child_process")
                   ...
               - pattern-inside: |
+                  let { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
                   const { ..., exec, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., exec, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., exec, ... } = require("node:child_process")
                   ...
       - patterns:
           - pattern: execSync($CMD, ...)
@@ -91,13 +103,321 @@ rules:
                   const { ..., execSync, ... } = require("child_process")
                   ...
               - pattern-inside: |
+                  let { ..., execSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
                   const { ..., execSync, ... } = require("node:child_process")
                   ...
-      # 4. spawn / spawnSync with shell: true (bound to exact $CP or bare imported spawn/spawnSync)
+              - pattern-inside: |
+                  let { ..., execSync, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execSync, ... } = require("node:child_process")
+                  ...
+      # 4. spawn / spawnSync / execFile / execFileSync with shell: true (never match without shell: true)
       - patterns:
           - pattern-either:
-              - pattern: '$CP.spawn($CMD, $ARGS, { ..., shell: true, ... })'
-              - pattern: '$CP.spawnSync($CMD, $ARGS, { ..., shell: true, ... })'
+              - pattern: '$CP.spawn($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.spawn($CMD, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.spawnSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.spawnSync($CMD, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.execFile($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.execFile($CMD, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.execFileSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$CP.execFileSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("node:child_process")
+                  ...
+      - pattern-either:
+          - pattern: 'require("child_process").spawn($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").spawn($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").spawnSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").spawnSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").spawn($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").spawn($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").spawnSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").spawnSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").execFile($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").execFile($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").execFileSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("child_process").execFileSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").execFile($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").execFile($CMD, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").execFileSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+          - pattern: 'require("node:child_process").execFileSync($CMD, { ..., shell: true, ... }, ...)'
+      - patterns:
+          - pattern-either:
+              - pattern: 'spawn($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'spawn($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., spawn, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., spawn, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., spawn, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., spawn, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., spawn, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., spawn, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., spawn, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., spawn, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: 'spawnSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'spawnSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., spawnSync, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., spawnSync, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., spawnSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., spawnSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., spawnSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., spawnSync, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., spawnSync, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., spawnSync, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: 'execFile($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'execFile($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., execFile, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., execFile, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., execFile, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., execFile, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFile, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: 'execFileSync($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'execFileSync($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., execFileSync, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., execFileSync, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., execFileSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., execFileSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFileSync, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., execFileSync, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., execFileSync, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFileSync, ... } = require("node:child_process")
+                  ...
+      # 5. util.promisify(exec) / promisify(exec) / promisify($CP.exec) (alias & inline)
+      - patterns:
+          - pattern: $EXEC_ASYNC($CMD, ...)
+          - pattern-not: $EXEC_ASYNC("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  const $EXEC_ASYNC = $UTIL.promisify(exec)
+                  ...
+              - pattern-inside: |
+                  let $EXEC_ASYNC = $UTIL.promisify(exec)
+                  ...
+              - pattern-inside: |
+                  var $EXEC_ASYNC = $UTIL.promisify(exec)
+                  ...
+              - pattern-inside: |
+                  const $EXEC_ASYNC = promisify(exec)
+                  ...
+              - pattern-inside: |
+                  let $EXEC_ASYNC = promisify(exec)
+                  ...
+              - pattern-inside: |
+                  var $EXEC_ASYNC = promisify(exec)
+                  ...
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., exec, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., exec, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., exec, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., exec, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern: $EXEC_ASYNC($CMD, ...)
+          - pattern-not: $EXEC_ASYNC("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  const $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                  ...
+              - pattern-inside: |
+                  let $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                  ...
+              - pattern-inside: |
+                  var $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                  ...
+              - pattern-inside: |
+                  const $EXEC_ASYNC = promisify($CP.exec)
+                  ...
+              - pattern-inside: |
+                  let $EXEC_ASYNC = promisify($CP.exec)
+                  ...
+              - pattern-inside: |
+                  var $EXEC_ASYNC = promisify($CP.exec)
+                  ...
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: $UTIL.promisify(exec)($CMD, ...)
+              - pattern: promisify(exec)($CMD, ...)
+          - pattern-not: $UTIL.promisify(exec)("...", ...)
+          - pattern-not: promisify(exec)("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., exec, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., exec, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: $UTIL.promisify($CP.exec)($CMD, ...)
+              - pattern: promisify($CP.exec)($CMD, ...)
+          - pattern-not: $UTIL.promisify($CP.exec)("...", ...)
+          - pattern-not: promisify($CP.exec)("...", ...)
           - pattern-either:
               - pattern-inside: |
                   import $CP from "child_process"
@@ -117,35 +437,152 @@ rules:
               - pattern-inside: |
                   const $CP = require("node:child_process")
                   ...
+      # 6. util.promisify(execFile) / promisify(execFile) / promisify($CP.execFile) with shell: true
       - patterns:
-          - pattern: 'spawn($CMD, $ARGS, { ..., shell: true, ... })'
+          - pattern-either:
+              - pattern: '$EXECF_ASYNC($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$EXECF_ASYNC($CMD, { ..., shell: true, ... }, ...)'
           - pattern-either:
               - pattern-inside: |
-                  import { ..., spawn, ... } from "child_process"
+                  const $EXECF_ASYNC = $UTIL.promisify(execFile)
                   ...
               - pattern-inside: |
-                  import { ..., spawn, ... } from "node:child_process"
+                  let $EXECF_ASYNC = $UTIL.promisify(execFile)
                   ...
               - pattern-inside: |
-                  const { ..., spawn, ... } = require("child_process")
+                  var $EXECF_ASYNC = $UTIL.promisify(execFile)
                   ...
               - pattern-inside: |
-                  const { ..., spawn, ... } = require("node:child_process")
+                  const $EXECF_ASYNC = promisify(execFile)
                   ...
-      - patterns:
-          - pattern: 'spawnSync($CMD, $ARGS, { ..., shell: true, ... })'
+              - pattern-inside: |
+                  let $EXECF_ASYNC = promisify(execFile)
+                  ...
+              - pattern-inside: |
+                  var $EXECF_ASYNC = promisify(execFile)
+                  ...
           - pattern-either:
               - pattern-inside: |
-                  import { ..., spawnSync, ... } from "child_process"
+                  import { ..., execFile, ... } from "child_process"
                   ...
               - pattern-inside: |
-                  import { ..., spawnSync, ... } from "node:child_process"
+                  import { ..., execFile, ... } from "node:child_process"
                   ...
               - pattern-inside: |
-                  const { ..., spawnSync, ... } = require("child_process")
+                  const { ..., execFile, ... } = require("child_process")
                   ...
               - pattern-inside: |
-                  const { ..., spawnSync, ... } = require("node:child_process")
+                  let { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., execFile, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let { ..., execFile, ... } = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var { ..., execFile, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: '$EXECF_ASYNC($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$EXECF_ASYNC($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  const $EXECF_ASYNC = $UTIL.promisify($CP.execFile)
+                  ...
+              - pattern-inside: |
+                  let $EXECF_ASYNC = $UTIL.promisify($CP.execFile)
+                  ...
+              - pattern-inside: |
+                  var $EXECF_ASYNC = $UTIL.promisify($CP.execFile)
+                  ...
+              - pattern-inside: |
+                  const $EXECF_ASYNC = promisify($CP.execFile)
+                  ...
+              - pattern-inside: |
+                  let $EXECF_ASYNC = promisify($CP.execFile)
+                  ...
+              - pattern-inside: |
+                  var $EXECF_ASYNC = promisify($CP.execFile)
+                  ...
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  let $CP = require("node:child_process")
+                  ...
+              - pattern-inside: |
+                  var $CP = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: '$UTIL.promisify(execFile)($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$UTIL.promisify(execFile)($CMD, { ..., shell: true, ... }, ...)'
+              - pattern: 'promisify(execFile)($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'promisify(execFile)($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., execFile, ... } from "child_process"
+                  ...
+              - pattern-inside: |
+                  import { ..., execFile, ... } from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const { ..., execFile, ... } = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const { ..., execFile, ... } = require("node:child_process")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: '$UTIL.promisify($CP.execFile)($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: '$UTIL.promisify($CP.execFile)($CMD, { ..., shell: true, ... }, ...)'
+              - pattern: 'promisify($CP.execFile)($CMD, $ARGS, { ..., shell: true, ... }, ...)'
+              - pattern: 'promisify($CP.execFile)($CMD, { ..., shell: true, ... }, ...)'
+          - pattern-either:
+              - pattern-inside: |
+                  import $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "child_process"
+                  ...
+              - pattern-inside: |
+                  import $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  import * as $CP from "node:child_process"
+                  ...
+              - pattern-inside: |
+                  const $CP = require("child_process")
+                  ...
+              - pattern-inside: |
+                  const $CP = require("node:child_process")
                   ...
 
   - id: mcp-js-obfuscated-exec
@@ -195,7 +632,19 @@ rules:
                       const $CP = require("child_process")
                       ...
                   - pattern-inside: |
+                      let $CP = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      var $CP = require("child_process")
+                      ...
+                  - pattern-inside: |
                       const $CP = require("node:child_process")
+                      ...
+                  - pattern-inside: |
+                      let $CP = require("node:child_process")
+                      ...
+                  - pattern-inside: |
+                      var $CP = require("node:child_process")
                       ...
           - patterns:
               - pattern: exec($SINK, ...)
@@ -227,6 +676,120 @@ rules:
                   - pattern-inside: |
                       const { ..., execSync, ... } = require("node:child_process")
                       ...
+          - patterns:
+              - pattern: $EXEC_ASYNC($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      const $EXEC_ASYNC = $UTIL.promisify(exec)
+                      ...
+                  - pattern-inside: |
+                      let $EXEC_ASYNC = $UTIL.promisify(exec)
+                      ...
+                  - pattern-inside: |
+                      var $EXEC_ASYNC = $UTIL.promisify(exec)
+                      ...
+                  - pattern-inside: |
+                      const $EXEC_ASYNC = promisify(exec)
+                      ...
+                  - pattern-inside: |
+                      let $EXEC_ASYNC = promisify(exec)
+                      ...
+                  - pattern-inside: |
+                      var $EXEC_ASYNC = promisify(exec)
+                      ...
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("node:child_process")
+                      ...
+          - patterns:
+              - pattern: $EXEC_ASYNC($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      const $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                      ...
+                  - pattern-inside: |
+                      let $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                      ...
+                  - pattern-inside: |
+                      var $EXEC_ASYNC = $UTIL.promisify($CP.exec)
+                      ...
+                  - pattern-inside: |
+                      const $EXEC_ASYNC = promisify($CP.exec)
+                      ...
+                  - pattern-inside: |
+                      let $EXEC_ASYNC = promisify($CP.exec)
+                      ...
+                  - pattern-inside: |
+                      var $EXEC_ASYNC = promisify($CP.exec)
+                      ...
+              - pattern-either:
+                  - pattern-inside: |
+                      import $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("node:child_process")
+                      ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $UTIL.promisify(exec)($SINK, ...)
+                  - pattern: promisify(exec)($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("node:child_process")
+                      ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $UTIL.promisify($CP.exec)($SINK, ...)
+                  - pattern: promisify($CP.exec)($SINK, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "child_process"
+                      ...
+                  - pattern-inside: |
+                      import $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      import * as $CP from "node:child_process"
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("child_process")
+                      ...
+                  - pattern-inside: |
+                      const $CP = require("node:child_process")
+                      ...
 
   - id: mcp-js-dynamic-code-exec
     languages: [javascript, typescript]
@@ -256,7 +819,7 @@ rules:
   - id: mcp-js-env-to-network
     languages: [javascript, typescript]
     severity: WARNING
-    message: "Environment variable data (process.env) flows into an outbound network call. Verify destination host, scope, and authorization policy."
+    message: "Sensitive environment variable data (process.env) flows into an outbound network call. Verify destination host, scope, and authorization policy."
     metadata:
       category: S
       kind: vulnerability
@@ -266,21 +829,238 @@ rules:
         - CWE-200
     mode: taint
     pattern-sources:
-      - pattern-either:
+      - patterns:
           - pattern: process.env
-          - pattern: process.env.$VAR
-          - pattern: process.env[$VAR]
+          - pattern-not-inside: process.env.$ANY
+          - pattern-not-inside: process.env?.$ANY
+          - pattern-not-inside: process.env[$ANY]
+          - pattern-not-inside: process.env?.[$ANY]
+          - pattern-not-inside: const { ... } = process.env
+          - pattern-not-inside: let { ... } = process.env
+          - pattern-not-inside: var { ... } = process.env
+      - patterns:
+          - pattern-either:
+              - pattern: process.env.$VAR
+              - pattern: process.env?.$VAR
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$'
+      - patterns:
+          - pattern-either:
+              - pattern: process.env[$KEY]
+              - pattern: process.env?.[$KEY]
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: '(?i)^[''"](?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY[''"]$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)[''"]$'
+      - patterns:
+          - pattern-either:
+              - pattern: const { ..., $VAR, ... } = process.env
+              - pattern: let { ..., $VAR, ... } = process.env
+              - pattern: var { ..., $VAR, ... } = process.env
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$'
+          - focus-metavariable: $VAR
     pattern-sinks:
       - pattern-either:
           - pattern: fetch($URL, ...)
           - pattern: axios($ARG, ...)
-          - pattern: axios.post($URL, ...)
           - pattern: axios.get($URL, ...)
+          - pattern: axios.post($URL, ...)
           - pattern: axios.put($URL, ...)
+          - pattern: axios.patch($URL, ...)
+          - pattern: axios.delete($URL, ...)
           - pattern: axios.request($ARG, ...)
-          - pattern: $HTTP.request($ARG, ...)
+          - pattern: http.request($ARG, ...)
+          - pattern: http.get($ARG, ...)
+          - pattern: https.request($ARG, ...)
+          - pattern: https.get($ARG, ...)
           - pattern: $NET.connect($ARG, ...)
           - pattern: $NET.createConnection($ARG, ...)
+      - patterns:
+          - pattern-either:
+              - pattern: $HTTP.request($ARG, ...)
+              - pattern: $HTTP.get($ARG, ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import $HTTP from "http"
+                  ...
+              - pattern-inside: |
+                  import * as $HTTP from "http"
+                  ...
+              - pattern-inside: |
+                  import $HTTP from "node:http"
+                  ...
+              - pattern-inside: |
+                  import * as $HTTP from "node:http"
+                  ...
+              - pattern-inside: |
+                  import $HTTP from "https"
+                  ...
+              - pattern-inside: |
+                  import * as $HTTP from "https"
+                  ...
+              - pattern-inside: |
+                  import $HTTP from "node:https"
+                  ...
+              - pattern-inside: |
+                  import * as $HTTP from "node:https"
+                  ...
+              - pattern-inside: |
+                  const $HTTP = require("http")
+                  ...
+              - pattern-inside: |
+                  let $HTTP = require("http")
+                  ...
+              - pattern-inside: |
+                  var $HTTP = require("http")
+                  ...
+              - pattern-inside: |
+                  const $HTTP = require("node:http")
+                  ...
+              - pattern-inside: |
+                  let $HTTP = require("node:http")
+                  ...
+              - pattern-inside: |
+                  var $HTTP = require("node:http")
+                  ...
+              - pattern-inside: |
+                  const $HTTP = require("https")
+                  ...
+              - pattern-inside: |
+                  let $HTTP = require("https")
+                  ...
+              - pattern-inside: |
+                  var $HTTP = require("https")
+                  ...
+              - pattern-inside: |
+                  const $HTTP = require("node:https")
+                  ...
+              - pattern-inside: |
+                  let $HTTP = require("node:https")
+                  ...
+              - pattern-inside: |
+                  var $HTTP = require("node:https")
+                  ...
+      - patterns:
+          - pattern: request($ARG, ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., request, ... } from "http"
+                  ...
+              - pattern-inside: |
+                  import { ..., request, ... } from "node:http"
+                  ...
+              - pattern-inside: |
+                  import { ..., request, ... } from "https"
+                  ...
+              - pattern-inside: |
+                  import { ..., request, ... } from "node:https"
+                  ...
+              - pattern-inside: |
+                  const { ..., request, ... } = require("http")
+                  ...
+              - pattern-inside: |
+                  const { ..., request, ... } = require("node:http")
+                  ...
+              - pattern-inside: |
+                  const { ..., request, ... } = require("https")
+                  ...
+              - pattern-inside: |
+                  const { ..., request, ... } = require("node:https")
+                  ...
+      - patterns:
+          - pattern: get($ARG, ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import { ..., get, ... } from "http"
+                  ...
+              - pattern-inside: |
+                  import { ..., get, ... } from "node:http"
+                  ...
+              - pattern-inside: |
+                  import { ..., get, ... } from "https"
+                  ...
+              - pattern-inside: |
+                  import { ..., get, ... } from "node:https"
+                  ...
+              - pattern-inside: |
+                  const { ..., get, ... } = require("http")
+                  ...
+              - pattern-inside: |
+                  const { ..., get, ... } = require("node:http")
+                  ...
+              - pattern-inside: |
+                  const { ..., get, ... } = require("https")
+                  ...
+              - pattern-inside: |
+                  const { ..., get, ... } = require("node:https")
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.write($BODY, ...)
+              - pattern: $REQ.end($BODY, ...)
+          - focus-metavariable: $BODY
+          - pattern-either:
+              - pattern-inside: |
+                  $REQ = http.request(...)
+                  ...
+              - pattern-inside: |
+                  $REQ = https.request(...)
+                  ...
+              - patterns:
+                  - pattern-inside: |
+                      $REQ = $HTTP.request(...)
+                      ...
+                  - pattern-either:
+                      - pattern-inside: |
+                          import $HTTP from "http"
+                          ...
+                      - pattern-inside: |
+                          import * as $HTTP from "http"
+                          ...
+                      - pattern-inside: |
+                          import $HTTP from "node:http"
+                          ...
+                      - pattern-inside: |
+                          import * as $HTTP from "node:http"
+                          ...
+                      - pattern-inside: |
+                          import $HTTP from "https"
+                          ...
+                      - pattern-inside: |
+                          import * as $HTTP from "https"
+                          ...
+                      - pattern-inside: |
+                          import $HTTP from "node:https"
+                          ...
+                      - pattern-inside: |
+                          import * as $HTTP from "node:https"
+                          ...
+                      - pattern-inside: |
+                          const $HTTP = require("http")
+                          ...
+                      - pattern-inside: |
+                          const $HTTP = require("node:http")
+                          ...
+                      - pattern-inside: |
+                          const $HTTP = require("https")
+                          ...
+                      - pattern-inside: |
+                          const $HTTP = require("node:https")
+                          ...
+      - patterns:
+          - pattern-either:
+              - pattern: $SOCK.write($BODY, ...)
+              - pattern: $SOCK.end($BODY, ...)
+          - focus-metavariable: $BODY
+          - pattern-either:
+              - pattern-inside: |
+                  $SOCK = $NET.connect(...)
+                  ...
+              - pattern-inside: |
+                  $SOCK = $NET.createConnection(...)
+                  ...
 
   - id: mcp-js-sensitive-file-to-network
     languages: [javascript, typescript]
@@ -295,24 +1075,242 @@ rules:
         - CWE-200
     mode: taint
     pattern-sources:
-      - patterns:
+      - label: SENSITIVE_PATH
+        pattern-either:
+          - patterns:
+              - pattern: $STR
+              - metavariable-regex:
+                  metavariable: $STR
+                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
+          - patterns:
+              - pattern-regex: '(?i)`[^`\r\n]*(?:\.ssh|\.aws|\.npmrc|\.gnupg|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|[/\\]\.env(?:\.[A-Za-z0-9_.-]+)?(?=[/\\`]|$)|id_rsa|id_ed25519|credentials)[^`\r\n]*`'
+          - patterns:
+              - pattern-either:
+                  - pattern: $PATH_MOD.join(..., $SEG, ...)
+                  - pattern: $PATH_MOD.resolve(..., $SEG, ...)
+              - metavariable-regex:
+                  metavariable: $SEG
+                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
+      - label: SENSITIVE_DATA
+        requires: SENSITIVE_PATH
+        pattern-either:
+          - pattern: $FS.readFileSync($P, ...)
+          - pattern: $FS.readFile($P, ...)
+          - pattern: $FS.promises.readFile($P, ...)
+          - pattern: readFileSync($P, ...)
+          - pattern: readFile($P, ...)
+    pattern-propagators:
+      - from: $P
+        to: $DATA
+        label: SENSITIVE_DATA
+        requires: SENSITIVE_PATH
+        patterns:
           - pattern-either:
-              - pattern: $FS.readFileSync($PATH, ...)
-              - pattern: $FS.readFile($PATH, ...)
-              - pattern: readFileSync($PATH, ...)
-              - pattern: readFile($PATH, ...)
-          - metavariable-regex:
-              metavariable: $PATH
-              regex: '(?i).*(\.ssh|\.aws|\.npmrc|(?:^|[''"/\\])\.env|id_rsa|credentials|secret|token).*'
+              - pattern: $FS.readFile($P, ..., ($ERR, $DATA) => { ... })
+              - pattern: $FS.readFile($P, ($ERR, $DATA) => { ... })
+              - pattern: readFile($P, ..., ($ERR, $DATA) => { ... })
+              - pattern: readFile($P, ($ERR, $DATA) => { ... })
     pattern-sinks:
-      - pattern-either:
+      - requires: SENSITIVE_DATA
+        pattern-either:
           - pattern: fetch($URL, ...)
           - pattern: axios($ARG, ...)
+          - pattern: axios.get($URL, ...)
           - pattern: axios.post($URL, ...)
           - pattern: axios.put($URL, ...)
+          - pattern: axios.patch($URL, ...)
+          - pattern: axios.delete($URL, ...)
           - pattern: axios.request($ARG, ...)
-          - pattern: $HTTP.request($ARG, ...)
+          - pattern: http.request($ARG, ...)
+          - pattern: http.get($ARG, ...)
+          - pattern: https.request($ARG, ...)
+          - pattern: https.get($ARG, ...)
           - pattern: $NET.connect($ARG, ...)
+          - pattern: $NET.createConnection($ARG, ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: $HTTP.request($ARG, ...)
+                  - pattern: $HTTP.get($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $HTTP from "http"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "http"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "https"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "https"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "node:https"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("node:https")
+                      ...
+          - patterns:
+              - pattern: request($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., request, ... } from "http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "https"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("node:https")
+                      ...
+          - patterns:
+              - pattern: get($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., get, ... } from "http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "https"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("node:https")
+                      ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $REQ.write($BODY, ...)
+                  - pattern: $REQ.end($BODY, ...)
+              - focus-metavariable: $BODY
+              - pattern-either:
+                  - pattern-inside: |
+                      $REQ = http.request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = https.request(...)
+                      ...
+                  - patterns:
+                      - pattern-inside: |
+                          $REQ = $HTTP.request(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $HTTP from "http"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "http"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "https"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "https"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "node:https"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "node:https"
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("node:https")
+                              ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $SOCK.write($BODY, ...)
+                  - pattern: $SOCK.end($BODY, ...)
+              - focus-metavariable: $BODY
+              - pattern-either:
+                  - pattern-inside: |
+                      $SOCK = $NET.connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = $NET.createConnection(...)
+                      ...
 
   - id: mcp-js-sensitive-fs-capability
     languages: [javascript, typescript]
@@ -323,12 +1321,26 @@ rules:
       kind: capability_info
       mcp_surface: A5
       behavior_class: sensitive_fs_read_capability
-    patterns:
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern: $STR
+          - metavariable-regex:
+              metavariable: $STR
+              regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials).*)[''"`]$'
+      - patterns:
+          - pattern-regex: '(?i)`[^`\r\n]*(?:\.ssh|\.aws|\.npmrc|\.gnupg|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|[/\\]\.env(?:\.[A-Za-z0-9_.-]+)?(?=[/\\`]|$)|id_rsa|id_ed25519|credentials)[^`\r\n]*`'
+      - patterns:
+          - pattern-either:
+              - pattern: $PATH_MOD.join(..., $SEG, ...)
+              - pattern: $PATH_MOD.resolve(..., $SEG, ...)
+          - metavariable-regex:
+              metavariable: $SEG
+              regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials).*)[''"`]$'
+    pattern-sinks:
       - pattern-either:
-          - pattern: $FS.readFileSync($PATH, ...)
-          - pattern: $FS.readFile($PATH, ...)
-          - pattern: readFileSync($PATH, ...)
-          - pattern: readFile($PATH, ...)
-      - metavariable-regex:
-          metavariable: $PATH
-          regex: '(?i).*(\.ssh|\.aws|\.npmrc|(?:^|[''"/\\])\.env|id_rsa|credentials).*'
+          - pattern: $FS.readFileSync($P, ...)
+          - pattern: $FS.readFile($P, ...)
+          - pattern: $FS.promises.readFile($P, ...)
+          - pattern: readFileSync($P, ...)
+          - pattern: readFile($P, ...)

