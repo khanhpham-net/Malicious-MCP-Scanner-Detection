@@ -7,10 +7,18 @@ the server, installing target dependencies, or running target scripts.
 
 ## Quick start
 
-Use Python 3.10 or later. Install MAC from this checkout:
+Core installation supports Python 3.10 or later. Install MAC from this checkout:
 
 ```sh
+# Core scanner (Python >= 3.10)
 python -m pip install .
+
+# Development & test suite (Python >= 3.10)
+python -m pip install -e ".[dev]"
+
+# Optional JS/TS P-surface parser (Python >= 3.11; pins tree-sitter==0.27.0,
+# tree-sitter-javascript==0.25.0, tree-sitter-typescript==0.23.2)
+python -m pip install ".[js]"
 ```
 
 Install Semgrep CE separately for full scans. MAC was verified with Semgrep CE
@@ -132,9 +140,23 @@ can leave a scan partial.
 
 ## Python P detector
 
-P runs by default in single and batch scans. Use `--no-p-detector` for an
-explicitly scoped ablation. This option is independent of `--no-sca` and
-`--no-semgrep`.
+P runs by default in single and batch scans. `--no-p-detector` and `--strict-p`
+are mutually exclusive options, and both are independent of `--no-sca` and
+`--no-semgrep`:
+
+- `static-default` (default): enables P across all 7 coverage keys
+  (`p_tool_description`, `p_input_schema_description`, `p_resource_metadata`,
+  `p_resource_body`, `p_prompt_metadata`, `p_prompt_message`, `p_tool_result`)
+  and `p_offline_relations`. Overall `scan_status` drops to `partial` only on
+  P budget/analysis errors or incomplete static metadata surfaces, while
+  `p_tool_result` runtime limits, missing optional `.[js]` parsers, and JS
+  relation limits are still reported honestly in `coverage.surfaces`,
+  `scanner.engines`, `diagnostics`, and `analysis_boundaries`.
+- `static-p-strict` (`--strict-p`): requires complete coverage across all P
+  surfaces (including `p_tool_result`) and `p_offline_relations`; any
+  incomplete P surface or relation lowers `scan_status` to `partial`
+  (`exit_code = 2`).
+- `--no-p-detector`: disables P analysis for explicitly scoped ablations.
 
 P examines tool descriptions, parameter schema descriptions, resource
 metadata/content, prompt metadata/messages, and tool results. English rules
@@ -172,8 +194,10 @@ component summaries show which other tools were fully inspected.
 
 Schema extraction follows supported import re-exports, reads explicit model
 descriptions, and reports custom model-schema hooks/configuration as unmeasured.
-Non-English detection and JS/TS P extraction remain unmeasured. Text spans locate
-original expressions/artifacts, not exact normalized character offsets.
+Non-English detection remains out of scope, while optional JS/TS P extraction is
+enabled by installing the `.[js]` extra on Python 3.11+ (without `.[js]`, JS/TS
+P surfaces are reported as `unmeasured`). Text spans locate original
+expressions/artifacts, not exact normalized character offsets.
 The English instruction rules are review heuristics with uncalibrated confidence;
 complete coverage within this bounded profile is not a benign verdict.
 
