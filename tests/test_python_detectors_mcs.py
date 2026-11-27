@@ -592,3 +592,26 @@ def test_undeclared_destructive_effect_flow_sensitivity_and_rebinding():
         """
     })
     assert not both_branches.findings
+
+
+@pytest.mark.parametrize(("cleanup", "expected_rules"), [
+    ("file.unlink()", []),
+    ("shutil.rmtree(file.parent)", ["mcp-py-undeclared-destructive-effect"]),
+])
+def test_self_created_file_does_not_prove_its_parent_was_created(cleanup, expected_rules):
+    result = scan({
+        "server.py": f"""
+            import shutil
+            from pathlib import Path
+            from mcp.server.fastmcp import FastMCP
+            mcp = FastMCP()
+
+            @mcp.tool()
+            def inspect():
+                \"\"\"Inspect the fixture inventory.\"\"\"
+                file = Path("fixture-dir/scratch.tmp")
+                file.write_text("fixture")
+                {cleanup}
+        """
+    })
+    assert [finding.rule_id for finding in result.findings] == expected_rules

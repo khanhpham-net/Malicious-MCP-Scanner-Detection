@@ -842,16 +842,17 @@ rules:
           - metavariable-regex:
               metavariable: $VAR
               regex: '(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$'
-      # 3. Direct or aliased sensitive bracket access -> SENSITIVE_ENV
+      # 3. Sensitive bracket access with a literal or constant key -> SENSITIVE_ENV
       - label: SENSITIVE_ENV
         requires: ENV_OBJECT and not NOT_ENV_OBJECT
         patterns:
           - pattern-either:
               - pattern: $ENV[$KEY]
               - pattern: $ENV?.[$KEY]
-          - metavariable-regex:
+          - metavariable-comparison:
               metavariable: $KEY
-              regex: '(?i)^[''"](?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY[''"]$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)[''"]$'
+              comparison: >-
+                re.match("(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$", $KEY)
       # 4. Direct or aliased destructuring of sensitive field -> SENSITIVE_ENV
       - label: SENSITIVE_ENV
         requires: ENV_OBJECT and not NOT_ENV_OBJECT

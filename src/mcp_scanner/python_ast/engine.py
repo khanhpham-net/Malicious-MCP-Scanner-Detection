@@ -719,7 +719,7 @@ class Frame:
                 return Value(ref="tuple", items=parents, marks=recv.marks)
             if node.attr == "parent" and recv.ref == "pathlib.Path":
                 parent = posixpath.dirname(recv.constant) if isinstance(recv.constant, str) else None
-                return replace(recv, constant=parent)
+                return replace(recv, constant=parent, self_created=False)
             ref = (recv.ref + "." + node.attr) if recv.ref else self.resolve(node)
             if recv.ref in self.engine.index.classes:
                 return Value(ref=ref, bound_to=recv, marks=recv.marks)
