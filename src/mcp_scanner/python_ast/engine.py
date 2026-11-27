@@ -160,7 +160,6 @@ class Frame:
         self.returns: list[Value] = []
         self.deferred = False
         self.method_self = None
-        self.created_paths: set[str] = set()
 
     def step(self, node, role, symbol):
         return TraceStep(role, location(self.mod.path, node), symbol=symbol)

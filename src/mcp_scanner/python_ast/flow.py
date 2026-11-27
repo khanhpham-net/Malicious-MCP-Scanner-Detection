@@ -17,6 +17,7 @@ class Value:
     ref: str = ""
     marks: dict[str, tuple[TraceStep, ...]] = field(default_factory=dict)
     temporary_path: bool = False
+    self_created: bool = False
     string_options: tuple[str, ...] = ()
     text_kind: str = ""
     shell_word: bool = False
@@ -84,6 +85,7 @@ def joined(left: Value, right: Value) -> Value:
         return left
     result = combine(left, right)
     result.temporary_path = left.temporary_path and right.temporary_path
+    result.self_created = left.self_created and right.self_created
     result.unresolved_callable = left.unresolved_callable or right.unresolved_callable
     result.shell_word = (
         (left.shell_word or left.is_shell_word()) and (right.shell_word or right.is_shell_word())

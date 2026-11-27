@@ -214,6 +214,27 @@ def process(frame, node, name, args, kw):
     return Value()
 
 
+def _mark_self_created(frame, path_node: ast.AST | None, path_val: Value) -> None:
+    """Record flow-sensitive creation proof in frame.env for non-input paths inside a function."""
+    if not frame.stack or "input" in path_val.marks:
+        return
+    if isinstance(path_node, ast.Name):
+        frame.env[path_node.id] = replace(path_val, self_created=True)
+    if isinstance(path_val.constant, str):
+        frame.env[f"__created_const__:{path_val.constant}"] = Value(self_created=True)
+
+
+def _is_self_created(frame, path_val: Value) -> bool:
+    """Return True only when all reaching control-flow paths proved the target was self-created."""
+    if "input" in path_val.marks:
+        return False
+    if path_val.self_created:
+        return True
+    if isinstance(path_val.constant, str):
+        return frame.env.get(f"__created_const__:{path_val.constant}", Value()).self_created
+    return False
+
+
 def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
     first = args[0] if args else Value()
     values = combine(*args, *kw.values())
@@ -223,22 +244,16 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
     effect = mutation(name, recv, args, kw)
     if effect:
         target = recv if name.startswith(("pathlib.Path.", "io.file.")) else kw.get("path", first)
-        target_node = (
-            node.func.value
-            if name.startswith(("pathlib.Path.", "io.file.")) and isinstance(node.func, ast.Attribute)
-            else next((k.value for k in node.keywords if k.arg == "path"), node.args[0] if node.args else None)
+        frame.effect(
+            node,
+            name,
+            effect,
+            temporary=target.temporary_path,
+            self_created=_is_self_created(frame, target),
         )
-        self_created = (
-            (isinstance(target_node, ast.Name) and target_node.id in frame.created_paths)
-            or (isinstance(target.constant, str) and f"const:{target.constant}" in frame.created_paths)
-        )
-        frame.effect(node, name, effect, temporary=target.temporary_path, self_created=self_created)
     if name in {"pathlib.Path.write_text", "pathlib.Path.write_bytes"}:
         path_node = node.func.value if isinstance(node.func, ast.Attribute) else None
-        if isinstance(path_node, ast.Name):
-            frame.created_paths.add(path_node.id)
-        if isinstance(recv.constant, str):
-            frame.created_paths.add(f"const:{recv.constant}")
+        _mark_self_created(frame, path_node, recv)
     if is_ssh_access_file(recv.constant) and (
         name in {"pathlib.Path.write_text", "pathlib.Path.write_bytes"}
         or name in {"io.file.write", "io.file.writelines"}
@@ -315,10 +330,7 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
                 if name == "pathlib.Path.open" and isinstance(node.func, ast.Attribute)
                 else next((k.value for k in node.keywords if k.arg == "file"), node.args[0] if node.args else None)
             )
-            if isinstance(path_node, ast.Name):
-                frame.created_paths.add(path_node.id)
-            if isinstance(path.constant, str):
-                frame.created_paths.add(f"const:{path.constant}")
+            _mark_self_created(frame, path_node, path)
         return Value(ref="io.file", constant=path.constant, temporary_path=path.temporary_path,
                      fields={"writable": Value(constant=writable)})
     if name in {"pathlib.Path.read_text", "pathlib.Path.read_bytes", "io.file.read", "io.file.readline", "io.file.readlines"}:
@@ -343,7 +355,8 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         if ref == "pathlib.Path" and args and all(isinstance(a.constant, str) for a in args):
             const = posixpath.join(*(a.constant for a in args))
         temporary = ref == "pathlib.Path" and within_temporary_path(first, args[1:])
-        return Value(ref=ref, constant=const, marks=values.marks, temporary_path=temporary)
+        self_created = ref == "pathlib.Path" and len(args) == 1 and first.self_created and "input" not in values.marks
+        return Value(ref=ref, constant=const, marks=values.marks, temporary_path=temporary, self_created=self_created)
     if name == "pathlib.Path.home":
         return Value(ref="pathlib.Path", constant="~")
     if name == "os.path.expanduser":
@@ -370,7 +383,9 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         if method == "joinpath" and isinstance(path, str) and all(isinstance(a.constant, str) for a in args):
             path = posixpath.join(path, *(a.constant for a in args))
         temporary = method == "joinpath" and within_temporary_path(recv, args)
-        return Value(ref="pathlib.Path", constant=path, marks=combine(recv, values).marks, temporary_path=temporary)
+        self_created = method != "joinpath" and recv.self_created and "input" not in values.marks
+        return Value(ref="pathlib.Path", constant=path, marks=combine(recv, values).marks,
+                     temporary_path=temporary, self_created=self_created)
     text_receiver = not recv.ref or recv.ref in {"str", "bytes", "bytearray"}
     if name in PRESERVE or method in TEXT_TRANSFORMS and text_receiver:
         transformed = combine(values, recv)

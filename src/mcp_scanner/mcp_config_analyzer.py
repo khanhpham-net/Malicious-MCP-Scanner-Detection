@@ -178,21 +178,104 @@ def _analyze_single_mcp_config(
         return findings, diagnostics
 
     if not isinstance(payload, dict):
+        diagnostics.append(
+            {
+                "kind": "mcp_config_invalid_structure",
+                "path": record.rel_path,
+                "reason": "top_level_not_object",
+                "message": f"Top-level JSON in {record.rel_path} must be an object.",
+            }
+        )
         return findings, diagnostics
 
-    for top_key in ("mcpServers", "servers"):
-        section = payload.get(top_key)
+    present_sections = [k for k in ("mcpServers", "servers") if k in payload]
+    if not present_sections:
+        if posixpath.basename(record.rel_path).lower() != "claude_desktop_config.json":
+            diagnostics.append(
+                {
+                    "kind": "mcp_config_invalid_structure",
+                    "path": record.rel_path,
+                    "reason": "missing_servers_object",
+                    "message": f"MCP configuration {record.rel_path} has no 'mcpServers' or 'servers' object.",
+                }
+            )
+        return findings, diagnostics
+
+    for top_key in present_sections:
+        section = payload[top_key]
         if not isinstance(section, dict):
+            diagnostics.append(
+                {
+                    "kind": "mcp_config_invalid_structure",
+                    "path": record.rel_path,
+                    "section": top_key,
+                    "reason": "servers_section_not_object",
+                    "message": f"Field '{top_key}' in {record.rel_path} must be an object.",
+                }
+            )
             continue
         for entry_name in sorted(section.keys()):
             cfg = section[entry_name]
-            if not isinstance(cfg, dict):
+            if not isinstance(entry_name, str) or not entry_name.strip() or not isinstance(cfg, dict):
+                diagnostics.append(
+                    {
+                        "kind": "mcp_config_invalid_structure",
+                        "path": record.rel_path,
+                        "section": top_key,
+                        "reason": "server_entry_not_object",
+                        "message": f"Server entry under '{top_key}' in {record.rel_path} must be an object.",
+                    }
+                )
                 continue
-            command = cfg.get("command")
-            if not isinstance(command, str) or not command.strip():
+            if "command" in cfg:
+                command = cfg["command"]
+                if not isinstance(command, str) or not command.strip():
+                    diagnostics.append(
+                        {
+                            "kind": "mcp_config_invalid_structure",
+                            "path": record.rel_path,
+                            "section": top_key,
+                            "reason": "invalid_command_field",
+                            "message": f"Server entry under '{top_key}' in {record.rel_path} has a missing or non-string 'command'.",
+                        }
+                    )
+                    continue
+                raw_args = cfg.get("args")
+                if (
+                    "args" in cfg
+                    and raw_args is not None
+                    and (not isinstance(raw_args, list) or any(not isinstance(a, str) for a in raw_args))
+                ):
+                    diagnostics.append(
+                        {
+                            "kind": "mcp_config_invalid_structure",
+                            "path": record.rel_path,
+                            "section": top_key,
+                            "reason": "invalid_args_field",
+                            "message": f"Server entry under '{top_key}' in {record.rel_path} has non-string-array 'args'.",
+                        }
+                    )
+                    continue
+                str_args = list(raw_args) if isinstance(raw_args, list) else []
+            else:
+                url_val = cfg.get("url") if "url" in cfg else cfg.get("serverUrl")
+                valid_remote = (
+                    ("url" in cfg or "serverUrl" in cfg)
+                    and isinstance(url_val, str)
+                    and bool(url_val.strip())
+                    and "args" not in cfg
+                )
+                if not valid_remote:
+                    diagnostics.append(
+                        {
+                            "kind": "mcp_config_invalid_structure",
+                            "path": record.rel_path,
+                            "section": top_key,
+                            "reason": "missing_command_or_url",
+                            "message": f"Server entry under '{top_key}' in {record.rel_path} lacks a valid 'command' or 'url' transport definition.",
+                        }
+                    )
                 continue
-            raw_args = cfg.get("args")
-            str_args = [a for a in raw_args if isinstance(a, str)] if isinstance(raw_args, list) else []
 
             classified = _classify_launcher_argv(command, str_args)
             if classified is None:

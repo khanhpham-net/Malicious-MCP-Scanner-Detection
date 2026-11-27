@@ -177,3 +177,53 @@ class McpConfigAnalyzerTests(unittest.TestCase):
                 self.assertEqual(f.owasp_mapping.primary_id, exp_owasp)
                 self.assertEqual(f.cwe_ids, exp_cwes)
                 self.assertNotIn(marker, report.to_json())
+
+    def test_invalid_mcp_config_structures_return_partial_and_never_claim_scanned(self) -> None:
+        marker = "SECRET_MARKER_777"
+        invalid_cases = [
+            ("top_list", "[]"),
+            ("empty_obj", "{}"),
+            ("mcpServers_list", '{"mcpServers": []}'),
+            ("entry_str", '{"mcpServers": {"s1": "bash -c id"}}'),
+            ("cmd_list", '{"mcpServers": {"s1": {"command": ["bash"]}}}'),
+            ("args_str", '{"mcpServers": {"s1": {"command": "bash", "args": "-c id"}}}'),
+            ("missing_transport", json.dumps({"mcpServers": {"s1": {"foo": marker}}})),
+        ]
+        for label, raw_json in invalid_cases:
+            with self.subTest(case=label):
+                inv = _virtual_inventory("mcp.json", raw_json)
+                with patch("mcp_scanner.scanner.collect_source_inventory", return_value=inv):
+                    report = run_scan(
+                        Path("virtual_mcp_repo"),
+                        enable_semgrep=False,
+                        enable_python_ast=False,
+                        enable_p_detector=False,
+                    )
+                _validate_against_schema(report.to_dict(), self.schema, self.schema)
+                self.assertEqual(report.scan_status, "partial")
+                self.assertEqual(report.policy_status, "not_evaluated")
+                self.assertEqual(report.exit_code, 2)
+                self.assertEqual(report.coverage.surfaces["config"], "partial")
+                self.assertIn(
+                    "mcp_config_invalid_structure",
+                    {d.get("kind") for d in report.diagnostics},
+                )
+                self.assertNotIn(marker, report.to_json())
+
+        # Valid SSE transport entry remains complete/pass and config=scanned
+        sse_inv = _virtual_inventory(
+            "mcp.json",
+            json.dumps({"mcpServers": {"sse-srv": {"type": "sse", "url": "http://127.0.0.1:8000/sse"}}}),
+        )
+        with patch("mcp_scanner.scanner.collect_source_inventory", return_value=sse_inv):
+            sse_report = run_scan(
+                Path("virtual_mcp_repo"),
+                enable_semgrep=False,
+                enable_python_ast=False,
+                enable_p_detector=False,
+            )
+        _validate_against_schema(sse_report.to_dict(), self.schema, self.schema)
+        self.assertEqual(sse_report.scan_status, "complete")
+        self.assertEqual(sse_report.policy_status, "pass")
+        self.assertEqual(sse_report.exit_code, 0)
+        self.assertEqual(sse_report.coverage.surfaces["config"], "scanned")

@@ -1029,6 +1029,8 @@ def run_scan(
             partial_reasons.append("MCP configuration analysis reached cutoff deadline")
         if any(d.get("kind") == "mcp_config_parse_error" for d in mcp_cfg_result.diagnostics):
             partial_reasons.append("Malformed MCP configuration JSON encountered")
+        if any(d.get("kind") == "mcp_config_invalid_structure" for d in mcp_cfg_result.diagnostics):
+            partial_reasons.append("Unsupported or invalid MCP configuration structure encountered")
 
     py_files = inventory.python_files()
     py_has_dynamic_dispatch = any(

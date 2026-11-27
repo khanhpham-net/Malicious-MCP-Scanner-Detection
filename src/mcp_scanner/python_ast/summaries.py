@@ -26,7 +26,7 @@ def value_key(value: Value, depth: int = 0):
     nested = depth + 1
     return (
         scalar, value.ref, sources, value.text_kind, value.shell_word, value.temporary_path,
-        value.string_options, value.unresolved_callable,
+        value.self_created, value.string_options, value.unresolved_callable,
         tuple(value_key(item, nested) for item in value.items[:32]),
         tuple((key, value_key(v, nested)) for key, v in sorted(value.fields.items())[:32]),
         tuple(part if isinstance(part, str) else value_key(part, nested) for part in value.shell_parts),
