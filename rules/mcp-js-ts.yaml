@@ -829,289 +829,75 @@ rules:
         - CWE-200
     mode: taint
     pattern-sources:
-      - patterns:
-          - pattern: process.env
-          - pattern-not-inside: process.env.$ANY
-          - pattern-not-inside: process.env?.$ANY
-          - pattern-not-inside: process.env[$ANY]
-          - pattern-not-inside: process.env?.[$ANY]
-          - pattern-not-inside: const { ... } = process.env
-          - pattern-not-inside: let { ... } = process.env
-          - pattern-not-inside: var { ... } = process.env
-      - patterns:
+      # 1. Whole process.env object reference (tracks aliases like `const env = process.env`, `process.env ?? {}`, `{ ...env }`)
+      - label: ENV_OBJECT
+        pattern: process.env
+      # 2. Direct or aliased sensitive dot / optional-chain property access -> SENSITIVE_ENV
+      - label: SENSITIVE_ENV
+        requires: ENV_OBJECT and not NOT_ENV_OBJECT
+        patterns:
           - pattern-either:
-              - pattern: process.env.$VAR
-              - pattern: process.env?.$VAR
+              - pattern: $ENV.$VAR
+              - pattern: $ENV?.$VAR
           - metavariable-regex:
               metavariable: $VAR
               regex: '(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$'
-      - patterns:
+      # 3. Direct or aliased sensitive bracket access -> SENSITIVE_ENV
+      - label: SENSITIVE_ENV
+        requires: ENV_OBJECT and not NOT_ENV_OBJECT
+        patterns:
           - pattern-either:
-              - pattern: process.env[$KEY]
-              - pattern: process.env?.[$KEY]
+              - pattern: $ENV[$KEY]
+              - pattern: $ENV?.[$KEY]
           - metavariable-regex:
               metavariable: $KEY
               regex: '(?i)^[''"](?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY[''"]$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)[''"]$'
-      - patterns:
+      # 4. Direct or aliased destructuring of sensitive field -> SENSITIVE_ENV
+      - label: SENSITIVE_ENV
+        requires: ENV_OBJECT and not NOT_ENV_OBJECT
+        patterns:
           - pattern-either:
-              - pattern: const { ..., $VAR, ... } = process.env
-              - pattern: let { ..., $VAR, ... } = process.env
-              - pattern: var { ..., $VAR, ... } = process.env
+              - pattern: const { ..., $VAR, ... } = $ENV
+              - pattern: let { ..., $VAR, ... } = $ENV
+              - pattern: var { ..., $VAR, ... } = $ENV
           - metavariable-regex:
               metavariable: $VAR
               regex: '(?i)^(?!(?:.*[_-])?(?:PUBLIC|CACHE|PRIMARY|SORT|PARTITION|FOREIGN|INDEX|LOCALE|I18N)[_-]?KEY$)(?:.*(?:TOKEN|SECRET|PASS(?:WORD|WD)?|CREDENTIAL|CRED(?:S)?|AUTH|COOKIE|BEARER|SIGNING|PRIVATE.?KEY|ACCESS.?KEY|API.?KEY|SESSION.?KEY|CLIENT.?KEY|MASTER.?KEY|ENCRYPTION.?KEY|STORAGE.?KEY|SERVICE.?KEY|APP.?KEY|SSH.?KEY|DOTENV.?KEY)|(?:.*_)?(?:PAT|DSN|KEY)(?:_.*)?|.+_PWD)$'
           - focus-metavariable: $VAR
-    pattern-sinks:
-      - pattern-either:
-          - pattern: fetch($URL, ...)
-          - pattern: axios($ARG, ...)
-          - pattern: axios.get($URL, ...)
-          - pattern: axios.post($URL, ...)
-          - pattern: axios.put($URL, ...)
-          - pattern: axios.patch($URL, ...)
-          - pattern: axios.delete($URL, ...)
-          - pattern: axios.request($ARG, ...)
-          - pattern: http.request($ARG, ...)
-          - pattern: http.get($ARG, ...)
-          - pattern: https.request($ARG, ...)
-          - pattern: https.get($ARG, ...)
-          - pattern: $NET.connect($ARG, ...)
-          - pattern: $NET.createConnection($ARG, ...)
-      - patterns:
-          - pattern-either:
-              - pattern: $HTTP.request($ARG, ...)
-              - pattern: $HTTP.get($ARG, ...)
-          - pattern-either:
-              - pattern-inside: |
-                  import $HTTP from "http"
-                  ...
-              - pattern-inside: |
-                  import * as $HTTP from "http"
-                  ...
-              - pattern-inside: |
-                  import $HTTP from "node:http"
-                  ...
-              - pattern-inside: |
-                  import * as $HTTP from "node:http"
-                  ...
-              - pattern-inside: |
-                  import $HTTP from "https"
-                  ...
-              - pattern-inside: |
-                  import * as $HTTP from "https"
-                  ...
-              - pattern-inside: |
-                  import $HTTP from "node:https"
-                  ...
-              - pattern-inside: |
-                  import * as $HTTP from "node:https"
-                  ...
-              - pattern-inside: |
-                  const $HTTP = require("http")
-                  ...
-              - pattern-inside: |
-                  let $HTTP = require("http")
-                  ...
-              - pattern-inside: |
-                  var $HTTP = require("http")
-                  ...
-              - pattern-inside: |
-                  const $HTTP = require("node:http")
-                  ...
-              - pattern-inside: |
-                  let $HTTP = require("node:http")
-                  ...
-              - pattern-inside: |
-                  var $HTTP = require("node:http")
-                  ...
-              - pattern-inside: |
-                  const $HTTP = require("https")
-                  ...
-              - pattern-inside: |
-                  let $HTTP = require("https")
-                  ...
-              - pattern-inside: |
-                  var $HTTP = require("https")
-                  ...
-              - pattern-inside: |
-                  const $HTTP = require("node:https")
-                  ...
-              - pattern-inside: |
-                  let $HTTP = require("node:https")
-                  ...
-              - pattern-inside: |
-                  var $HTTP = require("node:https")
-                  ...
-      - patterns:
-          - pattern: request($ARG, ...)
-          - pattern-either:
-              - pattern-inside: |
-                  import { ..., request, ... } from "http"
-                  ...
-              - pattern-inside: |
-                  import { ..., request, ... } from "node:http"
-                  ...
-              - pattern-inside: |
-                  import { ..., request, ... } from "https"
-                  ...
-              - pattern-inside: |
-                  import { ..., request, ... } from "node:https"
-                  ...
-              - pattern-inside: |
-                  const { ..., request, ... } = require("http")
-                  ...
-              - pattern-inside: |
-                  const { ..., request, ... } = require("node:http")
-                  ...
-              - pattern-inside: |
-                  const { ..., request, ... } = require("https")
-                  ...
-              - pattern-inside: |
-                  const { ..., request, ... } = require("node:https")
-                  ...
-      - patterns:
-          - pattern: get($ARG, ...)
-          - pattern-either:
-              - pattern-inside: |
-                  import { ..., get, ... } from "http"
-                  ...
-              - pattern-inside: |
-                  import { ..., get, ... } from "node:http"
-                  ...
-              - pattern-inside: |
-                  import { ..., get, ... } from "https"
-                  ...
-              - pattern-inside: |
-                  import { ..., get, ... } from "node:https"
-                  ...
-              - pattern-inside: |
-                  const { ..., get, ... } = require("http")
-                  ...
-              - pattern-inside: |
-                  const { ..., get, ... } = require("node:http")
-                  ...
-              - pattern-inside: |
-                  const { ..., get, ... } = require("https")
-                  ...
-              - pattern-inside: |
-                  const { ..., get, ... } = require("node:https")
-                  ...
-      - patterns:
-          - pattern-either:
-              - pattern: $REQ.write($BODY, ...)
-              - pattern: $REQ.end($BODY, ...)
-          - focus-metavariable: $BODY
-          - pattern-either:
-              - pattern-inside: |
-                  $REQ = http.request(...)
-                  ...
-              - pattern-inside: |
-                  $REQ = https.request(...)
-                  ...
-              - patterns:
-                  - pattern-inside: |
-                      $REQ = $HTTP.request(...)
-                      ...
-                  - pattern-either:
-                      - pattern-inside: |
-                          import $HTTP from "http"
-                          ...
-                      - pattern-inside: |
-                          import * as $HTTP from "http"
-                          ...
-                      - pattern-inside: |
-                          import $HTTP from "node:http"
-                          ...
-                      - pattern-inside: |
-                          import * as $HTTP from "node:http"
-                          ...
-                      - pattern-inside: |
-                          import $HTTP from "https"
-                          ...
-                      - pattern-inside: |
-                          import * as $HTTP from "https"
-                          ...
-                      - pattern-inside: |
-                          import $HTTP from "node:https"
-                          ...
-                      - pattern-inside: |
-                          import * as $HTTP from "node:https"
-                          ...
-                      - pattern-inside: |
-                          const $HTTP = require("http")
-                          ...
-                      - pattern-inside: |
-                          const $HTTP = require("node:http")
-                          ...
-                      - pattern-inside: |
-                          const $HTTP = require("https")
-                          ...
-                      - pattern-inside: |
-                          const $HTTP = require("node:https")
-                          ...
-      - patterns:
-          - pattern-either:
-              - pattern: $SOCK.write($BODY, ...)
-              - pattern: $SOCK.end($BODY, ...)
-          - focus-metavariable: $BODY
-          - pattern-either:
-              - pattern-inside: |
-                  $SOCK = $NET.connect(...)
-                  ...
-              - pattern-inside: |
-                  $SOCK = $NET.createConnection(...)
-                  ...
-
-  - id: mcp-js-sensitive-file-to-network
-    languages: [javascript, typescript]
-    severity: ERROR
-    message: "Sensitive local credential or configuration file contents flow into an outbound network call."
-    metadata:
-      category: S
-      kind: malicious_behavior
-      mcp_surface: A5
-      behavior_class: sensitive_file_to_network
-      cwe:
-        - CWE-200
-    mode: taint
-    pattern-sources:
-      - label: SENSITIVE_PATH
-        pattern-either:
-          - patterns:
-              - pattern: $STR
-              - metavariable-regex:
-                  metavariable: $STR
-                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
-          - patterns:
-              - pattern-regex: '(?i)`[^`\r\n]*(?:\.ssh|\.aws|\.npmrc|\.gnupg|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|[/\\]\.env(?:\.[A-Za-z0-9_.-]+)?(?=[/\\`]|$)|id_rsa|id_ed25519|credentials)[^`\r\n]*`'
-          - patterns:
-              - pattern-either:
-                  - pattern: $PATH_MOD.join(..., $SEG, ...)
-                  - pattern: $PATH_MOD.resolve(..., $SEG, ...)
-              - metavariable-regex:
-                  metavariable: $SEG
-                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
-      - label: SENSITIVE_DATA
-        requires: SENSITIVE_PATH
-        pattern-either:
-          - pattern: $FS.readFileSync($P, ...)
-          - pattern: $FS.readFile($P, ...)
-          - pattern: $FS.promises.readFile($P, ...)
-          - pattern: readFileSync($P, ...)
-          - pattern: readFile($P, ...)
-    pattern-propagators:
-      - from: $P
-        to: $DATA
-        label: SENSITIVE_DATA
-        requires: SENSITIVE_PATH
+      # 5. Any single-field extraction from ENV_OBJECT ceases to be the whole ENV_OBJECT
+      - label: NOT_ENV_OBJECT
+        requires: ENV_OBJECT
         patterns:
           - pattern-either:
-              - pattern: $FS.readFile($P, ..., ($ERR, $DATA) => { ... })
-              - pattern: $FS.readFile($P, ($ERR, $DATA) => { ... })
-              - pattern: readFile($P, ..., ($ERR, $DATA) => { ... })
-              - pattern: readFile($P, ($ERR, $DATA) => { ... })
+              - pattern: $ENV.$PROP
+              - pattern: $ENV?.$PROP
+              - pattern: $ENV[$PROP]
+              - pattern: $ENV?.[$PROP]
+          - pattern-not: process.env
+          - pattern-not: $ENV.$PROP(...)
+          - pattern-not: $ENV?.$PROP(...)
+          - pattern-not: Object.values(...).$PROP
+          - pattern-not: Object.entries(...).$PROP
+          - pattern-not: JSON.stringify(...).$PROP
+      - label: NOT_ENV_OBJECT
+        requires: ENV_OBJECT
+        patterns:
+          - pattern-either:
+              - pattern: const { ..., $PROP, ... } = $ENV
+              - pattern: let { ..., $PROP, ... } = $ENV
+              - pattern: var { ..., $PROP, ... } = $ENV
+          - focus-metavariable: $PROP
+    pattern-propagators:
+      - from: $E
+        to: $OUT
+        label: SENSITIVE_ENV
+        requires: ENV_OBJECT and not NOT_ENV_OBJECT
+        pattern-either:
+          - pattern: $OUT = JSON.stringify($E, ...)
+          - pattern: $OUT = Object.values($E)
+          - pattern: $OUT = Object.entries($E)
     pattern-sinks:
-      - requires: SENSITIVE_DATA
+      - requires: SENSITIVE_ENV or (ENV_OBJECT and not NOT_ENV_OBJECT)
         pattern-either:
           - pattern: fetch($URL, ...)
           - pattern: axios($ARG, ...)
@@ -1121,12 +907,6 @@ rules:
           - pattern: axios.patch($URL, ...)
           - pattern: axios.delete($URL, ...)
           - pattern: axios.request($ARG, ...)
-          - pattern: http.request($ARG, ...)
-          - pattern: http.get($ARG, ...)
-          - pattern: https.request($ARG, ...)
-          - pattern: https.get($ARG, ...)
-          - pattern: $NET.connect($ARG, ...)
-          - pattern: $NET.createConnection($ARG, ...)
           - patterns:
               - pattern-either:
                   - pattern: $HTTP.request($ARG, ...)
@@ -1192,6 +972,15 @@ rules:
                   - pattern-inside: |
                       var $HTTP = require("node:https")
                       ...
+          - pattern-either:
+              - pattern: require("http").request($ARG, ...)
+              - pattern: require("http").get($ARG, ...)
+              - pattern: require("node:http").request($ARG, ...)
+              - pattern: require("node:http").get($ARG, ...)
+              - pattern: require("https").request($ARG, ...)
+              - pattern: require("https").get($ARG, ...)
+              - pattern: require("node:https").request($ARG, ...)
+              - pattern: require("node:https").get($ARG, ...)
           - patterns:
               - pattern: request($ARG, ...)
               - pattern-either:
@@ -1211,13 +1000,37 @@ rules:
                       const { ..., request, ... } = require("http")
                       ...
                   - pattern-inside: |
+                      let { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
                       const { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("node:http")
                       ...
                   - pattern-inside: |
                       const { ..., request, ... } = require("https")
                       ...
                   - pattern-inside: |
+                      let { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
                       const { ..., request, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("node:https")
                       ...
           - patterns:
               - pattern: get($ARG, ...)
@@ -1238,13 +1051,37 @@ rules:
                       const { ..., get, ... } = require("http")
                       ...
                   - pattern-inside: |
+                      let { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
                       const { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("node:http")
                       ...
                   - pattern-inside: |
                       const { ..., get, ... } = require("https")
                       ...
                   - pattern-inside: |
+                      let { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
                       const { ..., get, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("node:https")
                       ...
           - patterns:
               - pattern-either:
@@ -1253,10 +1090,16 @@ rules:
               - focus-metavariable: $BODY
               - pattern-either:
                   - pattern-inside: |
-                      $REQ = http.request(...)
+                      $REQ = require("http").request(...)
                       ...
                   - pattern-inside: |
-                      $REQ = https.request(...)
+                      $REQ = require("node:http").request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = require("https").request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = require("node:https").request(...)
                       ...
                   - patterns:
                       - pattern-inside: |
@@ -1291,14 +1134,304 @@ rules:
                               const $HTTP = require("http")
                               ...
                           - pattern-inside: |
+                              let $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
                               const $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              let $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("node:http")
                               ...
                           - pattern-inside: |
                               const $HTTP = require("https")
                               ...
                           - pattern-inside: |
+                              let $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
                               const $HTTP = require("node:https")
                               ...
+                          - pattern-inside: |
+                              let $HTTP = require("node:https")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("node:https")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $REQ = request(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., request, ... } from "http"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "https"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "node:https"
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("http")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("https")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("node:https")
+                              ...
+          - patterns:
+              - pattern: $NET.connect($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "tls"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "tls"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "http2"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "http2"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:http2")
+                      ...
+          - patterns:
+              - pattern: $NET.createConnection($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:net")
+                      ...
+          - pattern-either:
+              - pattern: require("net").connect($ARG, ...)
+              - pattern: require("node:net").connect($ARG, ...)
+              - pattern: require("tls").connect($ARG, ...)
+              - pattern: require("node:tls").connect($ARG, ...)
+              - pattern: require("http2").connect($ARG, ...)
+              - pattern: require("node:http2").connect($ARG, ...)
+              - pattern: require("net").createConnection($ARG, ...)
+              - pattern: require("node:net").createConnection($ARG, ...)
+          - patterns:
+              - pattern: connect($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "tls"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "http2"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:http2")
+                      ...
+          - patterns:
+              - pattern: createConnection($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., createConnection, ... } from "net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., createConnection, ... } from "node:net"
+                      ...
+                  - pattern-inside: |
+                      const { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., createConnection, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., createConnection, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., createConnection, ... } = require("node:net")
+                      ...
           - patterns:
               - pattern-either:
                   - pattern: $SOCK.write($BODY, ...)
@@ -1306,11 +1439,966 @@ rules:
               - focus-metavariable: $BODY
               - pattern-either:
                   - pattern-inside: |
-                      $SOCK = $NET.connect(...)
+                      $SOCK = require("net").connect(...)
                       ...
                   - pattern-inside: |
-                      $SOCK = $NET.createConnection(...)
+                      $SOCK = require("node:net").connect(...)
                       ...
+                  - pattern-inside: |
+                      $SOCK = require("tls").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("node:tls").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("net").createConnection(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("node:net").createConnection(...)
+                      ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = $NET.connect(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "tls"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "tls"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:tls")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:tls")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:tls")
+                              ...
+                  - patterns:
+                      - pattern-either:
+                          - pattern-inside: |
+                              $SOCK = $NET.createConnection(...)
+                              ...
+                          - pattern-inside: |
+                              $SOCK = new $NET.Socket(...)
+                              ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:net")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = connect(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "tls"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("tls")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("node:tls")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = createConnection(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., createConnection, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., createConnection, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const { ..., createConnection, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., createConnection, ... } = require("node:net")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = new Socket(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., Socket, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., Socket, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const { ..., Socket, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., Socket, ... } = require("node:net")
+                              ...
+
+  - id: mcp-js-sensitive-file-to-network
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Sensitive local credential or configuration file contents flow into an outbound network call."
+    metadata:
+      category: S
+      kind: malicious_behavior
+      mcp_surface: A5
+      behavior_class: sensitive_file_to_network
+      cwe:
+        - CWE-200
+    mode: taint
+    pattern-sources:
+      - label: SENSITIVE_PATH
+        pattern-either:
+          - patterns:
+              - pattern: $STR
+              - metavariable-regex:
+                  metavariable: $STR
+                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
+          - patterns:
+              - pattern-regex: '(?i)`[^`\r\n]*(?:\.ssh|\.aws|\.npmrc|\.gnupg|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|[/\\]\.env(?:\.[A-Za-z0-9_.-]+)?(?=[/\\`]|$)|id_rsa|id_ed25519|credentials)[^`\r\n]*`'
+          - patterns:
+              - pattern-either:
+                  - pattern: $PATH_MOD.join(..., $SEG, ...)
+                  - pattern: $PATH_MOD.resolve(..., $SEG, ...)
+              - metavariable-regex:
+                  metavariable: $SEG
+                  regex: '(?i)^[''"`](?:.*[/\\])?(?:\.ssh(?:[/\\].*)?|\.aws(?:[/\\].*)?|\.npmrc|\.gnupg(?:[/\\].*)?|\.netrc|\.kube[/\\]config|\.docker[/\\]config\.json|\.env(?:\.[A-Za-z0-9_.-]+)?|.*(?:id_rsa|id_ed25519|credentials|secret|token).*)[''"`]$'
+      - label: SENSITIVE_DATA
+        requires: SENSITIVE_PATH
+        pattern-either:
+          - pattern: $FS.readFileSync($P, ...)
+          - pattern: $FS.readFile($P, ...)
+          - pattern: $FS.promises.readFile($P, ...)
+          - pattern: readFileSync($P, ...)
+          - pattern: readFile($P, ...)
+    pattern-propagators:
+      - from: $P
+        to: $DATA
+        label: SENSITIVE_DATA
+        requires: SENSITIVE_PATH
+        patterns:
+          - pattern-either:
+              - pattern: $FS.readFile($P, ..., ($ERR, $DATA) => { ... })
+              - pattern: $FS.readFile($P, ($ERR, $DATA) => { ... })
+              - pattern: readFile($P, ..., ($ERR, $DATA) => { ... })
+              - pattern: readFile($P, ($ERR, $DATA) => { ... })
+    pattern-sinks:
+      - requires: SENSITIVE_DATA
+        pattern-either:
+          - pattern: fetch($URL, ...)
+          - pattern: axios($ARG, ...)
+          - pattern: axios.get($URL, ...)
+          - pattern: axios.post($URL, ...)
+          - pattern: axios.put($URL, ...)
+          - pattern: axios.patch($URL, ...)
+          - pattern: axios.delete($URL, ...)
+          - pattern: axios.request($ARG, ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: $HTTP.request($ARG, ...)
+                  - pattern: $HTTP.get($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $HTTP from "http"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "http"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "https"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "https"
+                      ...
+                  - pattern-inside: |
+                      import $HTTP from "node:https"
+                      ...
+                  - pattern-inside: |
+                      import * as $HTTP from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("http")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("https")
+                      ...
+                  - pattern-inside: |
+                      const $HTTP = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let $HTTP = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var $HTTP = require("node:https")
+                      ...
+          - pattern-either:
+              - pattern: require("http").request($ARG, ...)
+              - pattern: require("http").get($ARG, ...)
+              - pattern: require("node:http").request($ARG, ...)
+              - pattern: require("node:http").get($ARG, ...)
+              - pattern: require("https").request($ARG, ...)
+              - pattern: require("https").get($ARG, ...)
+              - pattern: require("node:https").request($ARG, ...)
+              - pattern: require("node:https").get($ARG, ...)
+          - patterns:
+              - pattern: request($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., request, ... } from "http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "https"
+                      ...
+                  - pattern-inside: |
+                      import { ..., request, ... } from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      const { ..., request, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., request, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., request, ... } = require("node:https")
+                      ...
+          - patterns:
+              - pattern: get($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., get, ... } from "http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "node:http"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "https"
+                      ...
+                  - pattern-inside: |
+                      import { ..., get, ... } from "node:https"
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("node:http")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("https")
+                      ...
+                  - pattern-inside: |
+                      const { ..., get, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      let { ..., get, ... } = require("node:https")
+                      ...
+                  - pattern-inside: |
+                      var { ..., get, ... } = require("node:https")
+                      ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $REQ.write($BODY, ...)
+                  - pattern: $REQ.end($BODY, ...)
+              - focus-metavariable: $BODY
+              - pattern-either:
+                  - pattern-inside: |
+                      $REQ = require("http").request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = require("node:http").request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = require("https").request(...)
+                      ...
+                  - pattern-inside: |
+                      $REQ = require("node:https").request(...)
+                      ...
+                  - patterns:
+                      - pattern-inside: |
+                          $REQ = $HTTP.request(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $HTTP from "http"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "http"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "https"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "https"
+                              ...
+                          - pattern-inside: |
+                              import $HTTP from "node:https"
+                              ...
+                          - pattern-inside: |
+                              import * as $HTTP from "node:https"
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
+                              let $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("http")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              let $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
+                              let $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("https")
+                              ...
+                          - pattern-inside: |
+                              const $HTTP = require("node:https")
+                              ...
+                          - pattern-inside: |
+                              let $HTTP = require("node:https")
+                              ...
+                          - pattern-inside: |
+                              var $HTTP = require("node:https")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $REQ = request(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., request, ... } from "http"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "node:http"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "https"
+                              ...
+                          - pattern-inside: |
+                              import { ..., request, ... } from "node:https"
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("http")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("node:http")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("https")
+                              ...
+                          - pattern-inside: |
+                              const { ..., request, ... } = require("node:https")
+                              ...
+          - patterns:
+              - pattern: $NET.connect($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "tls"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "tls"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "http2"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "http2"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("tls")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("http2")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:http2")
+                      ...
+          - patterns:
+              - pattern: $NET.createConnection($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "net"
+                      ...
+                  - pattern-inside: |
+                      import $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import * as $NET from "node:net"
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("net")
+                      ...
+                  - pattern-inside: |
+                      const $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let $NET = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var $NET = require("node:net")
+                      ...
+          - pattern-either:
+              - pattern: require("net").connect($ARG, ...)
+              - pattern: require("node:net").connect($ARG, ...)
+              - pattern: require("tls").connect($ARG, ...)
+              - pattern: require("node:tls").connect($ARG, ...)
+              - pattern: require("http2").connect($ARG, ...)
+              - pattern: require("node:http2").connect($ARG, ...)
+              - pattern: require("net").createConnection($ARG, ...)
+              - pattern: require("node:net").createConnection($ARG, ...)
+          - patterns:
+              - pattern: connect($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "tls"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:tls"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "http2"
+                      ...
+                  - pattern-inside: |
+                      import { ..., connect, ... } from "node:http2"
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("tls")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:tls")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("http2")
+                      ...
+                  - pattern-inside: |
+                      const { ..., connect, ... } = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      let { ..., connect, ... } = require("node:http2")
+                      ...
+                  - pattern-inside: |
+                      var { ..., connect, ... } = require("node:http2")
+                      ...
+          - patterns:
+              - pattern: createConnection($ARG, ...)
+              - pattern-either:
+                  - pattern-inside: |
+                      import { ..., createConnection, ... } from "net"
+                      ...
+                  - pattern-inside: |
+                      import { ..., createConnection, ... } from "node:net"
+                      ...
+                  - pattern-inside: |
+                      const { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., createConnection, ... } = require("net")
+                      ...
+                  - pattern-inside: |
+                      const { ..., createConnection, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      let { ..., createConnection, ... } = require("node:net")
+                      ...
+                  - pattern-inside: |
+                      var { ..., createConnection, ... } = require("node:net")
+                      ...
+          - patterns:
+              - pattern-either:
+                  - pattern: $SOCK.write($BODY, ...)
+                  - pattern: $SOCK.end($BODY, ...)
+              - focus-metavariable: $BODY
+              - pattern-either:
+                  - pattern-inside: |
+                      $SOCK = require("net").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("node:net").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("tls").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("node:tls").connect(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("net").createConnection(...)
+                      ...
+                  - pattern-inside: |
+                      $SOCK = require("node:net").createConnection(...)
+                      ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = $NET.connect(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "tls"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "tls"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("tls")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:tls")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:tls")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:tls")
+                              ...
+                  - patterns:
+                      - pattern-either:
+                          - pattern-inside: |
+                              $SOCK = $NET.createConnection(...)
+                              ...
+                          - pattern-inside: |
+                              $SOCK = new $NET.Socket(...)
+                              ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "net"
+                              ...
+                          - pattern-inside: |
+                              import $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import * as $NET from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("net")
+                              ...
+                          - pattern-inside: |
+                              const $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              let $NET = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              var $NET = require("node:net")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = connect(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "tls"
+                              ...
+                          - pattern-inside: |
+                              import { ..., connect, ... } from "node:tls"
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("node:net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("tls")
+                              ...
+                          - pattern-inside: |
+                              const { ..., connect, ... } = require("node:tls")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = createConnection(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., createConnection, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., createConnection, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const { ..., createConnection, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., createConnection, ... } = require("node:net")
+                              ...
+                  - patterns:
+                      - pattern-inside: |
+                          $SOCK = new Socket(...)
+                          ...
+                      - pattern-either:
+                          - pattern-inside: |
+                              import { ..., Socket, ... } from "net"
+                              ...
+                          - pattern-inside: |
+                              import { ..., Socket, ... } from "node:net"
+                              ...
+                          - pattern-inside: |
+                              const { ..., Socket, ... } = require("net")
+                              ...
+                          - pattern-inside: |
+                              const { ..., Socket, ... } = require("node:net")
+                              ...
 
   - id: mcp-js-sensitive-fs-capability
     languages: [javascript, typescript]

