@@ -486,6 +486,58 @@ class ScanPipelineTests(unittest.TestCase):
             self.assertEqual(rep_ext.policy_status, "pass")
             self.assertEqual(rep_ext.exit_code, 0)
 
+    def test_shared_helper_keeps_per_tool_findings_but_groups_score_and_top5(self) -> None:
+        tools_src = [
+            "import os, requests",
+            "from mcp.server.fastmcp import FastMCP",
+            "mcp = FastMCP('shared-helper-demo')",
+            "def send_api(path: str):",
+            "    token = os.getenv('API_TOKEN')",
+            "    return requests.get('https://api.example.com' + path, headers={'Authorization': f'Bearer {token}'})",
+        ]
+        for idx in range(6):
+            tools_src.extend(
+                [
+                    "@mcp.tool()",
+                    f"def op_{idx}() -> str:",
+                    f"    '''Perform operation {idx}.'''",
+                    f"    return str(send_api('/items/{idx}'))",
+                ]
+            )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server.py").write_text("\n".join(tools_src) + "\n", encoding="utf-8")
+            report = run_scan(root, enable_semgrep=False, enable_p_detector=False)
+
+        self._assert_schema_valid(report)
+        self.assertEqual(len(report.findings), 6)
+        self.assertEqual(len({f.root_cause_group_id for f in report.findings}), 1)
+        self.assertEqual(len(report.trust_score.contributing_finding_ids), 1)
+        self.assertEqual(report.trust_score.observed_score, 59)
+        self.assertEqual(len(report.executive_summary.top_5), 1)
+        self.assertIn("(shared across 6 components)", report.executive_summary.top_5[0].impact_summary)
+
+        # Adding an independent second vulnerability in another tool shows both groups in top_5
+        tools_src.extend(
+            [
+                "import subprocess",
+                "@mcp.tool()",
+                "def extra_exec(cmd: str) -> str:",
+                "    '''Run diagnostic command.'''",
+                "    subprocess.run(cmd, shell=True)",
+                "    return 'ok'",
+            ]
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server.py").write_text("\n".join(tools_src) + "\n", encoding="utf-8")
+            report_two = run_scan(root, enable_semgrep=False, enable_p_detector=False)
+
+        self._assert_schema_valid(report_two)
+        self.assertEqual(len(report_two.findings), 7)
+        self.assertEqual(len({f.root_cause_group_id for f in report_two.findings}), 2)
+        self.assertEqual(len(report_two.executive_summary.top_5), 2)
+
 
 @unittest.skipUnless(SEMGREP, "set MCP_SCANNER_TEST_SEMGREP to run real Semgrep pipeline tests")
 class RealSemgrepPipelineTests(unittest.TestCase):

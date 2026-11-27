@@ -8,7 +8,12 @@ from pathlib import PurePosixPath
 import re
 
 from .flow import Value, combine, within_temporary_path
-from .process_effects import SENSITIVE_TRANSFER, fixed_process_effect, is_ssh_access_file
+from .process_effects import (
+    SENSITIVE_TRANSFER,
+    destructive_or_mutating_process_effect,
+    fixed_process_effect,
+    is_ssh_access_file,
+)
 from .shell_words import plain_shell_argv
 
 DECODE = {"base64.b64decode", "base64.standard_b64decode", "base64.urlsafe_b64decode",
@@ -42,6 +47,40 @@ SCALAR_METHODS = {
 SECRET_KEY = re.compile(r"(?:TOKEN|PASS(?:WORD|WD)?|SECRET|CREDENTIAL|API.?KEY|PRIVATE.?KEY|ACCESS.?KEY|AUTH|COOKIE|SESSION.?KEY)", re.I)
 SECRET_PATH = re.compile(r"(?:^|/)(?:\.env(?:\.[^/]*)?|\.(?:ssh|aws|gnupg)(?:/|$)|\.npmrc$|\.netrc$|credentials(?:\.[^/]*)?$|(?:tokens?|wallet|keystore)(?:[./]|$))", re.I)
 SQL_WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE)\b", re.I)
+_READONLY_LEAD_RE = re.compile(
+    r"\b(?:check|checks|verify|verifies|list|lists|traverse|traverses|read|reads|get|gets|fetch|fetches|"
+    r"inspect|inspects|scan|scans|analyz(?:e|es)|analysis|search|searches|find|finds|lookup|query|queries|"
+    r"show|shows|display|displays|describe|describes|view|views|count|counts|calculate|calculates|"
+    r"compute|computes|validate|validates|audit|audits|retrieve|retrieves|browse|browses|explore|explores)\b",
+    re.I,
+)
+_MUTATION_DISCLOSURE_RE = re.compile(
+    r"\b(?:delet(?:e|es|ed|ing|ion)|remov(?:e|es|ed|ing|al)|unlink(?:s|ing)?|eras(?:e|es|ed|ing)|"
+    r"purg(?:e|es|ed|ing)|wip(?:e|es|ed|ing)|clean(?:up|s|ed|ing)?|clear(?:s|ed|ing)?|destroy(?:s|ed|ing)?|"
+    r"prun(?:e|es|ed|ing)|truncat(?:e|es|ed|ing)|overwrit(?:e|es|ing)|uninstall(?:s|ed|ing)?|"
+    r"re-?index(?:es|ing)?|teardown|destructiv(?:e|ely)|expir(?:e|es|ing)|evict(?:s|ed|ing)?|"
+    r"drop(?:s|ped|ping)?|rotat(?:e|es|ing)|mov(?:e|es|ed|ing)|renam(?:e|es|ed|ing)|replac(?:e|es|ed|ing)|"
+    r"modif(?:y|ies|ied|ying)|alter(?:s|ed|ing)?|reset(?:s|ting)?|creat(?:e|es|ed|ing)|writ(?:e|es|ing)|"
+    r"sav(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|edit(?:s|ed|ing)?|patch(?:es|ed|ing)?|"
+    r"compress(?:es|ed|ing)?|convert(?:s|ed|ing)?|build(?:s|ing)?|deploy(?:s|ed|ing)?|install(?:s|ed|ing)?)\b",
+    re.I,
+)
+
+
+def is_readonly_tool_description(reg) -> bool:
+    """Return True conservatively when an unannotated tool clearly describes read-only inspection."""
+    if reg is None or reg.kind != "tool" or reg.readonly is not None or reg.destructive is not None:
+        return False
+    text = (getattr(reg, "description", "") or "").strip()
+    if not text:
+        return False
+    first_sentence = re.split(r"(?<=[.!?])\s+|\n\s*\n", text, maxsplit=1)[0]
+    lead = first_sentence[:240]
+    if not _READONLY_LEAD_RE.search(lead):
+        return False
+    if _MUTATION_DISCLOSURE_RE.search(f"{reg.name} {text}"):
+        return False
+    return True
 
 
 def secret_path(value) -> bool:
@@ -156,6 +195,21 @@ def process(frame, node, name, args, kw):
         behavior = "shell_sensitive_transfer" if effect == SENSITIVE_TRANSFER else "risky_fixed_execution"
         frame.emit(node, behavior, branch_step, symbol=name, detail=effect)
     elif frame.reg:
+        partial_argv = [item.constant if isinstance(item.constant, str) else None for item in worker_args]
+        mut_effect = destructive_or_mutating_process_effect(partial_argv)
+        if mut_effect:
+            if frame.reg.kind == "resource":
+                frame.emit(node, "resource_destruction", symbol=name,
+                           detail=f"External process in resource handler {mut_effect}.")
+                return Value()
+            if frame.reg.readonly is True or frame.reg.destructive is False:
+                frame.emit(node, "contract_mutation", symbol=name,
+                           detail=f"External process under restrictive contract {mut_effect}.")
+                return Value()
+            if is_readonly_tool_description(frame.reg):
+                frame.emit(node, "undeclared_destructive_effect", symbol=name,
+                           detail=f"External process in a tool described as read-only {mut_effect}.")
+                return Value()
         frame.worker(node, name, worker_args)
     return Value()
 
@@ -169,7 +223,22 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
     effect = mutation(name, recv, args, kw)
     if effect:
         target = recv if name.startswith(("pathlib.Path.", "io.file.")) else kw.get("path", first)
-        frame.effect(node, name, effect, temporary=target.temporary_path)
+        target_node = (
+            node.func.value
+            if name.startswith(("pathlib.Path.", "io.file.")) and isinstance(node.func, ast.Attribute)
+            else next((k.value for k in node.keywords if k.arg == "path"), node.args[0] if node.args else None)
+        )
+        self_created = (
+            (isinstance(target_node, ast.Name) and target_node.id in frame.created_paths)
+            or (isinstance(target.constant, str) and f"const:{target.constant}" in frame.created_paths)
+        )
+        frame.effect(node, name, effect, temporary=target.temporary_path, self_created=self_created)
+    if name in {"pathlib.Path.write_text", "pathlib.Path.write_bytes"}:
+        path_node = node.func.value if isinstance(node.func, ast.Attribute) else None
+        if isinstance(path_node, ast.Name):
+            frame.created_paths.add(path_node.id)
+        if isinstance(recv.constant, str):
+            frame.created_paths.add(f"const:{recv.constant}")
     if is_ssh_access_file(recv.constant) and (
         name in {"pathlib.Path.write_text", "pathlib.Path.write_bytes"}
         or name in {"io.file.write", "io.file.writelines"}
@@ -178,6 +247,12 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         frame.emit(node, "ssh_access_file_write", symbol=name)
     if name == "tempfile.TemporaryDirectory":
         return Value(ref=name)
+    if name in {"tempfile.mkdtemp", "tempfile.gettempdir"}:
+        return Value(ref=name, temporary_path=True)
+    if name == "tempfile.mkstemp":
+        return Value(ref="tuple", items=(Value(), Value(temporary_path=True)))
+    if name == "tempfile.NamedTemporaryFile":
+        return Value(ref=name, fields={"name": Value(temporary_path=True)})
     if name in {"print", "logging.info", "logging.warning", "logging.error", "logging.debug"} and "secret" in values.marks:
         frame.emit(node, "local_disclosure", values.marks["secret"], symbol=name)
     if name in PROCESS:
@@ -234,6 +309,16 @@ def call(frame, node: ast.Call, name: str, recv: Value, args, kw) -> Value:
         fallback_mode = args[mode_position] if len(args) > mode_position else Value(constant="r")
         mode = kw.get("mode", fallback_mode).constant
         writable = isinstance(mode, str) and any(flag in mode for flag in "wax+")
+        if isinstance(mode, str) and any(flag in mode for flag in "wx"):
+            path_node = (
+                node.func.value
+                if name == "pathlib.Path.open" and isinstance(node.func, ast.Attribute)
+                else next((k.value for k in node.keywords if k.arg == "file"), node.args[0] if node.args else None)
+            )
+            if isinstance(path_node, ast.Name):
+                frame.created_paths.add(path_node.id)
+            if isinstance(path.constant, str):
+                frame.created_paths.add(f"const:{path.constant}")
         return Value(ref="io.file", constant=path.constant, temporary_path=path.temporary_path,
                      fields={"writable": Value(constant=writable)})
     if name in {"pathlib.Path.read_text", "pathlib.Path.read_bytes", "io.file.read", "io.file.readline", "io.file.readlines"}:

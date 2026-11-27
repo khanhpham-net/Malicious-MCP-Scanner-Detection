@@ -41,6 +41,7 @@ from .p_prompt import extract_python_prompt_metadata, extract_python_prompt_mess
 from .p_js import extract_js_surfaces
 from .p_tool_result import extract_python_tool_results
 from .p_relations import analyze_instruction_relations, RELATION_VERSION
+from .mcp_config_analyzer import McpConfigAnalysisResult, analyze_mcp_config_files
 from .package_json_analyzer import PackageJsonAnalysisResult, analyze_package_json_files
 from .sca_adapter import ScaAnalysisResult, analyze_sca_offline
 from .semgrep_adapter import (
@@ -53,6 +54,7 @@ from .source_inventory import (
     DEFAULT_MAX_FILES,
     SourceInventory,
     collect_source_inventory,
+    is_mcp_config_filename,
 )
 
 DEFAULT_BUDGET_CUTOFF_SECONDS = 50.0
@@ -120,7 +122,7 @@ def _is_profile_source_path(rel_path: str) -> bool:
         return True
     if name.startswith("requirements") and name.endswith(".txt"):
         return True
-    if name.endswith("mcp.json"):
+    if is_mcp_config_filename(name):
         return True
     return False
 
@@ -244,17 +246,30 @@ def deduplicate_findings(
     *,
     semgrep_behavior_classes: dict[str, str] | None = None,
 ) -> list[Finding]:
-    """Deduplicate findings by root_cause_group_id with strict unambiguous AST/Semgrep fallback."""
-    by_rcg: dict[str, Finding] = {}
+    """Deduplicate findings by (root_cause_group_id, component) with strict unambiguous AST/Semgrep fallback."""
+    by_key: dict[tuple[str, str], Finding] = {}
     for item in findings:
-        existing = by_rcg.get(item.root_cause_group_id)
+        key = (item.root_cause_group_id, item.component)
+        existing = by_key.get(key)
         if existing is None:
-            by_rcg[item.root_cause_group_id] = item
+            by_key[key] = item
         else:
             winner, loser = _prefer_finding(existing, item)
-            by_rcg[item.root_cause_group_id] = _merge_two_findings(winner, loser)
+            by_key[key] = _merge_two_findings(winner, loser)
 
-    deduped = list(by_rcg.values())
+    known_by_rcg: dict[str, list[Finding]] = {}
+    for item in by_key.values():
+        if item.component != "unknown":
+            known_by_rcg.setdefault(item.root_cause_group_id, []).append(item)
+
+    deduped: list[Finding] = []
+    for item in by_key.values():
+        if item.component == "unknown":
+            matches = known_by_rcg.get(item.root_cause_group_id, [])
+            if len(matches) == 1:
+                _merge_two_findings(matches[0], item)
+                continue
+        deduped.append(item)
     if not semgrep_behavior_classes:
         return sorted(deduped, key=lambda f: f.finding_id)
 
@@ -376,24 +391,40 @@ def _build_executive_summary(
         ),
     )
 
+    group_components: dict[str, set[str]] = {}
+    for f in actionable:
+        group_components.setdefault(f.root_cause_group_id, set()).add(f.component)
+
     top_5: list[TopFindingSummary] = []
-    for f in ranked[:5]:
+    seen_rcgs: set[str] = set()
+    for f in ranked:
+        if f.root_cause_group_id in seen_rcgs:
+            continue
+        seen_rcgs.add(f.root_cause_group_id)
         span = f.sink_span or f.declaration_span
         if span is not None:
             loc = f"{span.path}:{span.start_line}" if span.start_line else span.path
         else:
             loc = f.component
+        shared_count = len(group_components.get(f.root_cause_group_id, set()))
+        impact = (
+            f"{f.reasoning} (shared across {shared_count} components)"
+            if shared_count > 1
+            else f.reasoning
+        )
         top_5.append(
             TopFindingSummary(
                 finding_id=f.finding_id,
                 title=f.title,
                 severity=f.severity,
                 owasp_id=f.owasp_mapping.primary_id if f.owasp_mapping.status == "mapped" else None,
-                impact_summary=f.reasoning,
+                impact_summary=impact,
                 location=loc,
                 remediation=f.remediation,
             )
         )
+        if len(top_5) >= 5:
+            break
 
     if scan_status == "failed":
         tldr = "Scan failed before completing static inspection; review diagnostics for root cause."
@@ -701,6 +732,20 @@ def run_scan(
     diagnostics.extend(pkg_result.diagnostics)
     analysis_boundaries.extend(pkg_result.analysis_boundaries)
 
+    # Stage 2b: MCP launcher configuration static analysis
+    _notify("mcp_config:start", "Inspecting MCP launcher configurations")
+    t0 = time.monotonic()
+    mcp_cfg_result: McpConfigAnalysisResult = analyze_mcp_config_files(
+        inventory, server_id=resolved_server_id, deadline=deadline
+    )
+    stage_durations["tier1_mcp_config"] = time.monotonic() - t0
+    _notify(
+        "mcp_config:done",
+        f"{mcp_cfg_result.status}, {stage_durations['tier1_mcp_config'] * 1000:.0f}ms",
+    )
+    diagnostics.extend(mcp_cfg_result.diagnostics)
+    analysis_boundaries.extend(mcp_cfg_result.analysis_boundaries)
+
     # Stage 3: Python AST engine (Branch B hook)
     _notify("python_ast:start", "Running Python AST analysis")
     if enable_python_ast:
@@ -930,6 +975,7 @@ def run_scan(
     t0 = time.monotonic()
     raw_findings: list[Finding] = []
     raw_findings.extend(pkg_result.findings)
+    raw_findings.extend(mcp_cfg_result.findings)
     raw_findings.extend(sca_result.findings)
     raw_findings.extend(py_data["findings"])
     raw_findings.extend(sg_result.findings)
@@ -977,6 +1023,12 @@ def run_scan(
             partial_reasons.append(
                 f"{uninspected_gyp} binding.gyp install-time command target(s) could not be inspected"
             )
+
+    if mcp_cfg_result.status == "partial":
+        if any(b.kind == "budget_exceeded" for b in mcp_cfg_result.analysis_boundaries):
+            partial_reasons.append("MCP configuration analysis reached cutoff deadline")
+        if any(d.get("kind") == "mcp_config_parse_error" for d in mcp_cfg_result.diagnostics):
+            partial_reasons.append("Malformed MCP configuration JSON encountered")
 
     py_files = inventory.python_files()
     py_has_dynamic_dispatch = any(
@@ -1065,11 +1117,15 @@ def run_scan(
         findings, scan_status=scan_status, partial_reasons=partial_reasons
     )
 
+    has_config_files = bool(
+        inventory.package_json_files() or inventory.binding_gyp_files() or inventory.mcp_config_files()
+    )
+    config_partial = pkg_result.status == "partial" or mcp_cfg_result.status == "partial"
     surfaces: dict[str, str] = {
         "bootstrap": "scanned" if (inventory.files and scan_status == "complete") else "partial",
         "config": (
-            ("scanned" if pkg_result.status == "complete" else "partial")
-            if (inventory.package_json_files() or inventory.binding_gyp_files())
+            ("partial" if config_partial else "scanned")
+            if has_config_files
             else "none_found"
         ),
     }
@@ -1111,6 +1167,7 @@ def run_scan(
     engines: list[dict[str, Any]] = [
         {"name": "source_inventory", "version": __version__, "status": inv_status},
         {"name": "package_json_analyzer", "version": __version__, "status": pkg_result.status},
+        {"name": "mcp_config_analyzer", "version": __version__, "status": mcp_cfg_result.status},
         {
             "name": "sca_osv",
             "version": __version__,

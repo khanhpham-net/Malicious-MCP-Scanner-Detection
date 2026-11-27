@@ -85,6 +85,7 @@ class Registration:
     readonly: bool | None
     destructive: bool | None
     scope_calls: tuple = ()
+    description: str = ""
 
 
 class Index:
@@ -241,9 +242,14 @@ class Index:
             hints = {kw.arg: literal(kw.value) for kw in annotation.keywords}
         elif isinstance(annotation, ast.Dict):
             hints = {literal(k): literal(v) for k, v in zip(annotation.keys, annotation.values)}
+        dec_desc = literal(argument(call, "description")) if call else None
+        doc = ast.get_docstring(function) or ""
+        description = "\n".join(
+            part.strip() for part in (dec_desc, doc) if isinstance(part, str) and part.strip()
+        )
         self.registrations.append(Registration(mod, handler_module, function, node, instance, kind,
             name if isinstance(name, str) else function.name,
-            hints.get("readOnlyHint"), hints.get("destructiveHint"), scope_calls))
+            hints.get("readOnlyHint"), hints.get("destructiveHint"), scope_calls, description))
         self._known_regs.add(key)
 
     def class_lineage(self, name):

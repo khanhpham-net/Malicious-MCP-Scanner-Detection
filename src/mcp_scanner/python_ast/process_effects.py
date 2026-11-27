@@ -21,8 +21,9 @@ _KEY_FILE = re.compile(r"(?:^|/)\.ssh/authorized_keys2?$")
 _KEY_TYPE = re.compile(r"^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+)(?:\s|$)")
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_./-]+$")
 _CREDENTIAL = re.compile(r"(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)", re.I)
-_SENSITIVE_PATH = re.compile(r"(?:^/etc/g?shadow$|(?:^|/)\.ssh/id_[^/]+$|(?:^|/)\.env$)")
+_SENSITIVE_PATH = re.compile(r"(?:^/etc/g?shadow$|(?:^|/)\.ssh/id_[^/]+$|(?:^|/)\.env$|(?:^|/)\.aws/credentials$)")
 SENSITIVE_TRANSFER = "credential or environment data piped to a network client"
+SENSITIVE_ENCRYPTION = "encrypts a sensitive system or credential file"
 _WIPE_ROOTS = {"/", "/*", "/**", "/home", "/home/*", "/etc", "/etc/*", "/usr", "/usr/*",
                "/var", "/var/*", "/root", "/root/*", "/dev", "/dev/*", "/boot", "/boot/*",
                "/bin", "/bin/*", "/sbin", "/sbin/*"}
@@ -111,7 +112,51 @@ def _sends_sensitive_data(source: list[str], sink: list[str]) -> bool:
     )
 
 
+def _unwrap_prefix_builtins(argv: Sequence[str]) -> Sequence[str]:
+    """Strip shell prefix builtins (exec/nohup/command) to inspect the wrapped command."""
+    current = list(argv)
+    for _ in range(4):
+        if not current:
+            break
+        prog = _program(current[0])
+        if prog == "exec" and len(current) >= 2:
+            idx = 1
+            while idx < len(current):
+                tok = current[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-l", "-c"}:
+                    idx += 1
+                elif tok == "-a":
+                    idx += 2
+                else:
+                    break
+            current = current[idx:]
+            continue
+        if prog == "nohup" and len(current) >= 2:
+            idx = 2 if current[1] == "--" else 1
+            current = current[idx:]
+            continue
+        if prog == "command" and len(current) >= 2:
+            idx = 1
+            query_only = False
+            while idx < len(current) and current[idx] in {"-p", "-v", "-V", "--"}:
+                if current[idx] in {"-v", "-V"}:
+                    query_only = True
+                idx += 1
+                if current[idx - 1] == "--":
+                    break
+            if query_only:
+                return ()
+            current = current[idx:]
+            continue
+        break
+    return current
+
+
 def _base_effect(argv: Sequence[str], redirects: Sequence[tuple[str, str]]) -> str | None:
+    argv = _unwrap_prefix_builtins(argv)
     if not argv:
         return None
     name, *args = argv
@@ -119,6 +164,24 @@ def _base_effect(argv: Sequence[str], redirects: Sequence[tuple[str, str]]) -> s
     options = args[:args.index("--")] if "--" in args else args
     if "--help" in options or "--version" in options:
         return None
+    if program == "openssl" and args:
+        subcmd = args[0].lower()
+        rest = args[1:]
+        is_encrypt = (
+            (subcmd in {"cms", "smime", "pkeyutl"} and "-encrypt" in rest and "-decrypt" not in rest)
+            or (subcmd == "enc" and "-d" not in rest and "-decrypt" not in rest)
+        )
+        if is_encrypt:
+            in_path = None
+            for idx, opt in enumerate(rest):
+                if opt == "-in" and idx + 1 < len(rest):
+                    in_path = rest[idx + 1]
+                    break
+                if opt.startswith("-in="):
+                    in_path = opt[4:]
+                    break
+            if in_path and (_SENSITIVE_PATH.search(in_path.replace("\\", "/")) or is_ssh_access_file(in_path)):
+                return SENSITIVE_ENCRYPTION
     if program in _SHELLS and any(
         flag == "--interactive" or re.fullmatch(r"-[a-zA-Z]*i[a-zA-Z]*", flag)
         for flag in options
@@ -235,6 +298,43 @@ def fixed_process_effect(
         return None
     if executable is not None:
         argv = (executable, *argv[1:])
-    if _program(argv[0]) in _SHELLS and len(argv) >= 3 and argv[1] in {"-c", "-lc"}:
-        return _shell_effect(argv[2])
+    if _program(argv[0]) in _SHELLS:
+        idx = 1
+        while idx < len(argv) - 1:
+            flag = argv[idx]
+            if not re.fullmatch(r"-[eiluxc]+", flag):
+                break
+            if "c" in flag:
+                return _shell_effect(argv[idx + 1])
+            idx += 1
     return _base_effect(argv, ())
+
+
+def destructive_or_mutating_process_effect(argv: Sequence[str | None]) -> str | None:
+    """Recognize high-confidence destructive or file-encrypting external commands even with dynamic targets."""
+    if not argv or not isinstance(argv[0], str):
+        return None
+    program = _program(argv[0]).lower()
+    known_args = [arg for arg in argv[1:] if isinstance(arg, str)]
+    if "--help" in known_args or "--version" in known_args:
+        return None
+    if program == "openssl" and len(argv) >= 2 and isinstance(argv[1], str):
+        subcmd = argv[1].lower()
+        rest = known_args[1:]
+        if (
+            (subcmd in {"cms", "smime", "pkeyutl"} and "-encrypt" in rest and "-decrypt" not in rest)
+            or (subcmd == "enc" and "-d" not in rest and "-decrypt" not in rest)
+        ):
+            return "encrypts files via openssl"
+    if program in {"gpg", "gpg2"}:
+        if any(flag in {"-e", "--encrypt", "-c", "--symmetric"} for flag in known_args) and not any(
+            flag in {"-d", "--decrypt"} for flag in known_args
+        ):
+            return "encrypts files via gpg"
+    if program in {"rm", "shred", "srm", "wipe"}:
+        return "deletes or shreds files via external process"
+    if program == "dd" and any(arg.startswith("of=") for arg in known_args):
+        return "overwrites files or devices via dd"
+    if program in {"chmod", "chown", "chattr"}:
+        return "modifies file permissions or ownership via external process"
+    return None

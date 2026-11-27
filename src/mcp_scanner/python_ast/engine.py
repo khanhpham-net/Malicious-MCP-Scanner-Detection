@@ -26,6 +26,8 @@ RULES = {
                               "Statically resolved command performs a high-risk operation", []),
     "resource_destruction": ("mcp-py-resource-destruction", "M", "semantic_indicator", "high",
                              "MCP resource removes or truncates persistent data", []),
+    "undeclared_destructive_effect": ("mcp-py-undeclared-destructive-effect", "M", "semantic_indicator", "medium",
+                                      "Tool described as read-only performs a destructive filesystem or file-modifying process operation", []),
     "ssh_access_file_write": ("mcp-py-ssh-access-file-write", "config_auth", "semantic_indicator", "high",
                               "Python writes to an SSH access-control file", []),
     "worker_mutation": ("mcp-py-worker-mutation", "C", "semantic_indicator", "high",
@@ -47,6 +49,10 @@ RULES = {
 _RESOURCE_DESTRUCTION_APIS = {
     "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree",
     "pathlib.Path.unlink", "pathlib.Path.rmdir", "io.file.truncate",
+}
+_DESTRUCTIVE_FS_APIS = {
+    "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree",
+    "pathlib.Path.unlink", "pathlib.Path.rmdir",
 }
 
 
@@ -154,6 +160,7 @@ class Frame:
         self.returns: list[Value] = []
         self.deferred = False
         self.method_self = None
+        self.created_paths: set[str] = set()
 
     def step(self, node, role, symbol):
         return TraceStep(role, location(self.mod.path, node), symbol=symbol)
@@ -174,14 +181,18 @@ class Frame:
         fid = make_finding_id(server, rid, sink, declaration)
         if fid in self.engine.findings:
             return
-        group = make_root_cause_group_id(server, component, behavior, sink)
+        rcg_component = "shared_helper" if (reg and self.calls) else component
+        group = make_root_cause_group_id(server, rcg_component, behavior, sink)
         trace = []
         if reg and category == "M":
-            trace.append(TraceStep("source", declaration, symbol="MCP contract"))
+            sym = "MCP tool description" if behavior == "undeclared_destructive_effect" else "MCP contract"
+            trace.append(TraceStep("source", declaration, symbol=sym))
         for step in (*steps, *self.calls, *self.control_steps, self.step(node, "sink", symbol), *extra):
             if step not in trace:
                 trace.append(step)
         limits = ["Network destination and credential audience are unverified."] if category == "S" else []
+        if behavior == "undeclared_destructive_effect":
+            limits.append("Read-only intent was inferred statically from the tool description in the absence of explicit ToolAnnotations.")
         if any(step.edge_kind == "possible" for step in trace):
             limits.append("A statically possible branch or call target requires runtime confirmation.")
         if reg and reg.instance in self.engine.index.unverified_instances:
@@ -205,13 +216,26 @@ class Frame:
             and name in _RESOURCE_DESTRUCTION_APIS and not temporary
         )
 
-    def effect(self, node, name, effect, *, temporary=False):
+    def effect(self, node, name, effect, *, temporary=False, self_created=False):
         if self.worker_effects is not None:
             self.worker_effects.append((effect, self.step(node, "sink", name), temporary))
         elif self._resource_destruction(name, temporary):
             self.emit(node, "resource_destruction", symbol=name, detail="Destructive filesystem operation reached from a resource handler.")
         elif self.reg and (self.reg.readonly is True or (self.reg.destructive is False and effect != "write")):
             self.emit(node, "contract_mutation", symbol=name, detail=f"Observed persistent operation: {effect}.")
+        elif (
+            name in _DESTRUCTIVE_FS_APIS
+            and not temporary
+            and not self_created
+            and self.reg
+            and rules.is_readonly_tool_description(self.reg)
+        ):
+            self.emit(
+                node,
+                "undeclared_destructive_effect",
+                symbol=name,
+                detail=f"Destructive filesystem operation ({name}) reached from a tool described as read-only.",
+            )
 
     def worker(self, node, name, argv):
         if self.worker_effects is not None:
@@ -501,7 +525,11 @@ class Frame:
                 for item in node.items:
                     v = self.value(item.context_expr)
                     if item.optional_vars:
-                        entered = Value(temporary_path=True) if v.ref == "tempfile.TemporaryDirectory" else v
+                        entered = (
+                            Value(temporary_path=True)
+                            if v.ref == "tempfile.TemporaryDirectory"
+                            else v
+                        )
                         self.bind(item.optional_vars, entered)
                 if not self.block(node.body):
                     return False
@@ -685,6 +713,8 @@ class Frame:
             recv = self.value(node.value)
             if node.attr in recv.fields and recv.ref in self.engine.index.classes:
                 return recv.fields[node.attr]
+            if recv.ref == "tempfile.NamedTemporaryFile" and node.attr == "name":
+                return Value(temporary_path=True)
             if node.attr == "parents" and recv.ref == "pathlib.Path" and isinstance(recv.constant, str):
                 parents = tuple(Value(ref="pathlib.Path", constant=str(p)) for p in PurePosixPath(recv.constant).parents)
                 return Value(ref="tuple", items=parents, marks=recv.marks)

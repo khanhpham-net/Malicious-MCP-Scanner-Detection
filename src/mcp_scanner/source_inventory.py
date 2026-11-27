@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -290,6 +291,13 @@ class SourceInventory:
             if Path(record.rel_path).name.lower() == "binding.gyp"
         ]
 
+    def mcp_config_files(self) -> list[SourceFileRecord]:
+        return [
+            record
+            for record in self.files
+            if record.language == "json" and is_mcp_config_filename(Path(record.rel_path).name)
+        ]
+
     def dependency_files(self) -> list[SourceFileRecord]:
         dep_names = {
             "package.json",
@@ -376,12 +384,25 @@ def _is_minified(text: str, language: str) -> bool:
     return avg_line_len > DEFAULT_MINIFIED_AVG_LINE_LEN
 
 
+_MCP_CONFIG_NUM_RE = re.compile(r"mcp\d*\.json")
+
+
+def is_mcp_config_filename(filename: str) -> bool:
+    """Return True if filename matches a known MCP launcher configuration JSON filename."""
+    low = filename.lower()
+    if low == "claude_desktop_config.json":
+        return True
+    if _MCP_CONFIG_NUM_RE.fullmatch(low):
+        return True
+    return low.endswith((".mcp.json", "-mcp.json", "_mcp.json"))
+
+
 def _priority_key(rel_path: str, language: str) -> tuple[int, int, str]:
     """Deterministic reachability-oriented ordering before applying max_files budget."""
     parts = rel_path.split("/")
     name = parts[-1].lower()
     depth = len(parts)
-    if name in ENTRYPOINT_NAMES or name.endswith("mcp.json"):
+    if name in ENTRYPOINT_NAMES or is_mcp_config_filename(name):
         tier = 0
     elif language in {"python", "javascript", "typescript"}:
         tier = 1
